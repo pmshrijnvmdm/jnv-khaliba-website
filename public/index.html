@@ -28,6 +28,9 @@ header.top button{background:var(--saffron);color:#fff;border:none;padding:8px 1
 .home-card p{font-size:12.5px;color:var(--muted);margin:0;}
 label{display:block;font-size:12.5px;font-weight:600;color:var(--navy);margin:12px 0 5px;}
 input,select,textarea{width:100%;padding:10px 12px;border:1px solid var(--line);border-radius:8px;font-size:14px;font-family:inherit;}
+.pw-wrap{position:relative;}
+.pw-wrap input{padding-right:42px;}
+.pw-toggle{position:absolute;right:4px;top:50%;transform:translateY(-50%);background:none;border:none;cursor:pointer;font-size:17px;padding:6px 8px;line-height:1;}
 .btn{display:inline-block;padding:10px 18px;border-radius:8px;font-weight:600;font-size:13.5px;border:none;cursor:pointer;margin-top:14px;margin-right:8px;}
 .btn-primary{background:var(--saffron);color:#fff;}
 .btn-outline{background:transparent;border:1.5px solid var(--navy);color:var(--navy);}
@@ -474,6 +477,18 @@ function grade(mark, maxMarks){
   const pct = (Number(mark)/mx)*100;
   if(pct>=91) return "A1"; if(pct>=81) return "A2"; if(pct>=71) return "B1";
   if(pct>=61) return "B2"; if(pct>=51) return "C1"; return "C2";
+}
+function pwField(id, placeholder){
+  return `<div class="pw-wrap"><input id="${id}" type="password" placeholder="${placeholder||'Password'}" autocomplete="off"><button type="button" class="pw-toggle" data-target="${id}">👁</button></div>`;
+}
+function wirePasswordToggle(id){
+  const btn = document.querySelector('.pw-toggle[data-target="'+id+'"]');
+  const inp = document.getElementById(id);
+  if(!btn || !inp) return;
+  btn.onclick=()=>{
+    if(inp.type==="password"){ inp.type="text"; btn.textContent="🙈"; }
+    else { inp.type="password"; btn.textContent="👁"; }
+  };
 }
 function nowStr(){
   return new Date().toLocaleString("en-IN",{day:"2-digit",month:"short",year:"numeric",hour:"2-digit",minute:"2-digit"});
@@ -1431,7 +1446,7 @@ function renderTeacherLogin(){
       <label>Employee ID (or Mobile Number for contractual staff)</label>
       <input id="tid" placeholder="Employee ID / Mobile Number">
       <label>Password</label>
-      <input id="tpass" type="password" placeholder="Password">
+      ${pwField("tpass")}
       ${captchaHtml("teacher")}
       <div class="error" id="terr"></div>
       <button class="btn btn-primary" id="tlogin">Login</button>
@@ -1439,6 +1454,7 @@ function renderTeacherLogin(){
   `;
   document.getElementById("back").onclick=()=>go("home");
   wireCaptchaRefresh("teacher");
+  wirePasswordToggle("tpass");
   document.getElementById("tlogin").onclick=()=>{
     const id=document.getElementById("tid").value.trim();
     const pw=document.getElementById("tpass").value.trim();
@@ -2272,7 +2288,7 @@ function renderPrincipalLogin(){
       <label>Employee ID</label>
       <input id="pid" placeholder="Employee ID">
       <label>Password</label>
-      <input id="ppass" type="password" placeholder="Password">
+      ${pwField("ppass")}
       ${captchaHtml("principal")}
       <div class="error" id="perr"></div>
       <button class="btn btn-primary" id="plogin">Login</button>
@@ -2280,6 +2296,7 @@ function renderPrincipalLogin(){
   `;
   document.getElementById("back").onclick=()=>go("home");
   wireCaptchaRefresh("principal");
+  wirePasswordToggle("ppass");
   document.getElementById("plogin").onclick=()=>{
     const id=document.getElementById("pid").value.trim();
     const pw=document.getElementById("ppass").value.trim();
@@ -2307,7 +2324,7 @@ function renderAdminLogin(){
       <label>Admin ID</label>
       <input id="aid" placeholder="Admin ID">
       <label>Password</label>
-      <input id="apass" type="password" placeholder="Password">
+      ${pwField("apass")}
       ${captchaHtml("admin")}
       <div class="error" id="aerr"></div>
       <button class="btn btn-primary" id="alogin">Login</button>
@@ -2315,6 +2332,7 @@ function renderAdminLogin(){
   `;
   document.getElementById("back").onclick=()=>go("home");
   wireCaptchaRefresh("admin");
+  wirePasswordToggle("apass");
   document.getElementById("alogin").onclick=()=>{
     const id=document.getElementById("aid").value.trim();
     const pw=document.getElementById("apass").value.trim();
@@ -2342,7 +2360,7 @@ function renderExamDeptLogin(){
       <label>ID</label>
       <input id="edid" placeholder="Exam Department ID">
       <label>Password</label>
-      <input id="edpass" type="password" placeholder="Password">
+      ${pwField("edpass")}
       ${captchaHtml("examdept")}
       <div class="error" id="ederr"></div>
       <button class="btn btn-primary" id="edlogin">Login</button>
@@ -2350,6 +2368,7 @@ function renderExamDeptLogin(){
   `;
   document.getElementById("back").onclick=()=>go("home");
   wireCaptchaRefresh("examdept");
+  wirePasswordToggle("edpass");
   document.getElementById("edlogin").onclick=()=>{
     const id=document.getElementById("edid").value.trim();
     const pw=document.getElementById("edpass").value.trim();
@@ -2376,7 +2395,7 @@ function renderLibraryLogin(){
       <label>ID</label>
       <input id="lbid" placeholder="Library ID">
       <label>Password</label>
-      <input id="lbpass" type="password" placeholder="Password">
+      ${pwField("lbpass")}
       ${captchaHtml("library")}
       <div class="error" id="lberr"></div>
       <button class="btn btn-primary" id="lblogin">Login</button>
@@ -2384,6 +2403,7 @@ function renderLibraryLogin(){
   `;
   document.getElementById("back").onclick=()=>go("home");
   wireCaptchaRefresh("library");
+  wirePasswordToggle("lbpass");
   document.getElementById("lblogin").onclick=()=>{
     const id=document.getElementById("lbid").value.trim();
     const pw=document.getElementById("lbpass").value.trim();
@@ -3442,7 +3462,7 @@ function renderStudentLogin(){
       <label>Date of Birth</label>
       <input id="sdob" type="date">
       <label>Password</label>
-      <input id="spass" type="password" placeholder="Password">
+      ${pwField("spass")}
       ${captchaHtml("student")}
       <div class="error" id="serr"></div>
       <button class="btn btn-primary" id="slogin">Login</button>
@@ -3450,6 +3470,7 @@ function renderStudentLogin(){
   `;
   document.getElementById("back").onclick=()=>go("home");
   wireCaptchaRefresh("student");
+  wirePasswordToggle("spass");
   document.getElementById("slogin").onclick=()=>{
     const mobile=document.getElementById("smobile").value.trim();
     const dob=document.getElementById("sdob").value;
@@ -3530,11 +3551,11 @@ function changePasswordBlock(role, id, defaultPass){
     <div class="pwsec">
       <h4>Change Password</h4>
       <label>Current Password</label>
-      <input type="password" id="pw_old_${role}">
+      ${pwField("pw_old_"+role)}
       <label>New Password</label>
-      <input type="password" id="pw_new_${role}">
+      ${pwField("pw_new_"+role)}
       <label>Confirm New Password</label>
-      <input type="password" id="pw_confirm_${role}">
+      ${pwField("pw_confirm_"+role)}
       <div class="error" id="pw_err_${role}"></div>
       <div class="success" id="pw_ok_${role}"></div>
       <button class="btn btn-outline" id="pw_btn_${role}">Update Password</button>
@@ -3544,6 +3565,9 @@ function changePasswordBlock(role, id, defaultPass){
 function wireChangePassword(role, id, defaultPass){
   const btn = document.getElementById("pw_btn_"+role);
   if(!btn) return;
+  wirePasswordToggle("pw_old_"+role);
+  wirePasswordToggle("pw_new_"+role);
+  wirePasswordToggle("pw_confirm_"+role);
   btn.onclick = ()=>{
     const oldV = document.getElementById("pw_old_"+role).value.trim();
     const newV = document.getElementById("pw_new_"+role).value.trim();
