@@ -4,6 +4,10 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>JNV Khaliba Ambikapur — Result Portal</title>
+<link rel="manifest" href="manifest.json">
+<meta name="theme-color" content="#0B2A4A">
+<link rel="icon" href="icon-192.png">
+<link rel="apple-touch-icon" href="icon-192.png">
 <style>
 :root{
   --navy:#0B2A4A; --royal:#14508F; --saffron:#E08A1E; --green:#1E7A46;
@@ -638,6 +642,7 @@ function setMarkFor(r, roll, subjectName, value){
 function studentOverall(r, roll){
   let scored=0, max=0;
   r.subjects.forEach(s=>{
+    if(Number(s.maxMarks)===0) return; // "Out of" set to 0 = subject not held for this exam
     const v = markFor(r, roll, s.name);
     if(v!==""&&v!=null){ scored += Number(v); max += Number(s.maxMarks||100); }
   });
@@ -1653,16 +1658,22 @@ function renderTeacherDash(){
     return `<span class="${cls}" data-exam="${e.key}" style="display:inline-block;padding:6px 12px;border:1px solid var(--line);border-radius:20px;margin:0 6px 6px 0;font-size:12.5px;">${e.label} <span class="status ${rr.status}" style="margin-left:6px;">${rr.status}</span></span>`;
   }).join("");
 
-  const subjectHeaders = r.subjects.map((s,si)=>`
-    <th>
+  const subjectHeaders = r.subjects.map((s,si)=>{
+    const inactive = Number(s.maxMarks)===0;
+    return `
+    <th style="${inactive?'opacity:0.5;':''}">
       ${s.name}<br>
       <span style="font-weight:400;font-size:10.5px;">out of
-        <input class="maxmarks-box" data-si="${si}" type="number" min="1" value="${s.maxMarks}" ${locked?"disabled":""} style="width:52px;padding:3px 4px;">
+        <input class="maxmarks-box" data-si="${si}" type="number" min="0" value="${s.maxMarks}" ${locked?"disabled":""} style="width:52px;padding:3px 4px;">
       </span>
-    </th>`).join("");
+      ${inactive?'<br><span style="font-size:9.5px;color:var(--red);">Not held this exam</span>':''}
+    </th>`;
+  }).join("");
 
   const rows = roster.map(s=>{
     const cells = r.subjects.map(sub=>{
+      const inactive = Number(sub.maxMarks)===0;
+      if(inactive) return `<td style="background:#f2f2f2;text-align:center;color:var(--muted);">—</td>`;
       const m = markFor(r, s.roll, sub.name);
       return `<td><input class="mark-box" data-roll="${s.roll}" data-subject="${sub.name}" type="number" min="0" max="${sub.maxMarks}" value="${m}" ${locked?"disabled":""} style="width:56px;"></td>`;
     }).join("");
@@ -1703,6 +1714,16 @@ function renderTeacherDash(){
       </div>
 
       <div style="margin-top:10px;">${statusBadge}</div>
+      ${roster.length && !locked ? `
+      <div class="locked-note" style="margin-top:10px;">
+        <b>📋 Bulk Paste Marks</b> — first line: subject names exactly as shown in the column headers above (comma/tab separated, only the subjects your test covered). Following lines: Roll No, then marks in that same column order. Use "AB" or leave blank for absent.
+        <textarea id="bulkPasteBox" rows="5" style="margin-top:8px;" placeholder="Roll,Hindi,English,Mathematics,Science,Social Science,Skill Subject
+9A01,36,30,13,6,23,32
+9A02,20,27,10,11,25,26"></textarea>
+        <button class="btn btn-outline btn-sm" id="bulkImportBtn" style="margin-top:6px;">Import Pasted Marks</button>
+        <div class="error" id="bulkImportErr"></div>
+        <div class="success" id="bulkImportOk"></div>
+      </div>` : ""}
       ${roster.length ? `
       <div class="scrollbox" style="margin-top:10px;">
         <table>
@@ -1730,11 +1751,74 @@ function renderTeacherDash(){
 
   if(!locked){
     document.querySelectorAll(".maxmarks-box").forEach(inp=>{
-      inp.onchange=(e)=>{ r.subjects[Number(e.target.dataset.si)].maxMarks = Number(e.target.value)||100; saveDB(); render(); };
+      inp.onchange=(e)=>{
+        const v = e.target.value.trim();
+        r.subjects[Number(e.target.dataset.si)].maxMarks = (v==="" || isNaN(Number(v))) ? 100 : Number(v);
+        saveDB(); render();
+      };
     });
     document.querySelectorAll(".mark-box").forEach(inp=>{
       inp.oninput=(e)=>{ setMarkFor(r, e.target.dataset.roll, e.target.dataset.subject, e.target.value); saveDB(); };
     });
+    const bulkBtn = document.getElementById("bulkImportBtn");
+    if(bulkBtn) bulkBtn.onclick=()=>{
+      const text = document.getElementById("bulkPasteBox").value.trim();
+      const errEl = document.getElementById("bulkImportErr"); errEl.textContent="";
+      const okEl = document.getElementById("bulkImportOk"); okEl.textContent="";
+      if(!text){ errEl.textContent="Please paste some rows first, including the header line."; return; }
+      const lines = text.split("\n").map(l=>l.trim()).filter(l=>l);
+      if(lines.length<2){ errEl.textContent="Need a header line (subject names) plus at least one student row."; return; }
+      const norm = s => (s||"").toLowerCase().replace(/[^a-z]/g,"");
+      const SUBJECT_ALIASES = {
+        hin:"hindi", eng:"english", maths:"mathematics", math:"mathematics",
+        sci:"science", sst:"socialscience", ss:"socialscience",
+        skill:"skillsubject", pe:"physicaleducation", comp:"computer",
+        art:"arteducation", kv:"kaushalvikas", reglang:"regionallanguage",
+        forlang:"foreignadditionallanguage"
+      };
+      const headerCells = lines[0].split(/\t|,/).map(c=>c.trim());
+      // First header cell is assumed to be "Roll" — map remaining cells to r.subjects by name
+      // (exact match first, then a common-abbreviation lookup, then closest-length substring match).
+      const colToSubject = headerCells.slice(1).map(h=>{
+        let hN = norm(h);
+        if(SUBJECT_ALIASES[hN]) hN = SUBJECT_ALIASES[hN];
+        let exact = r.subjects.find(sub=>norm(sub.name)===hN);
+        if(exact) return exact.name;
+        let best=null, bestDiff=999;
+        r.subjects.forEach(sub=>{
+          const sN = norm(sub.name);
+          if(sN.includes(hN) || hN.includes(sN)){
+            const diff = Math.abs(sN.length-hN.length);
+            if(diff<bestDiff){ bestDiff=diff; best=sub.name; }
+          }
+        });
+        return best;
+      });
+      if(colToSubject.every(x=>!x)){ errEl.textContent="Could not match any header names to this class's subjects. Check spelling against the column headers above."; return; }
+      let matched=0, unmatchedRoll=[], unmatchedHeaders=[];
+      headerCells.slice(1).forEach((h,i)=>{ if(!colToSubject[i]) unmatchedHeaders.push(h); });
+      lines.slice(1).forEach(line=>{
+        const parts = line.split(/\t|,/).map(p=>p.trim());
+        const roll = parts[0];
+        const marks = parts.slice(1);
+        const stu = roster.find(s=>s.roll.toLowerCase()===roll.toLowerCase());
+        if(!stu){ unmatchedRoll.push(roll); return; }
+        matched++;
+        colToSubject.forEach((subName,i)=>{
+          if(!subName) return;
+          const val = marks[i];
+          if(val===undefined || val==="") return;
+          if(val.toUpperCase()==="AB") return; // leave blank for absent
+          setMarkFor(r, stu.roll, subName, val);
+        });
+      });
+      saveDB();
+      let msg = `Imported marks for ${matched} student(s), ${colToSubject.filter(Boolean).length} subject column(s) matched.`;
+      if(unmatchedHeaders.length) msg += " Unmatched subject headers (skipped): "+unmatchedHeaders.join(", ")+".";
+      if(unmatchedRoll.length) msg += " Unmatched roll numbers (skipped): "+unmatchedRoll.join(", ")+".";
+      okEl.textContent = msg;
+      setTimeout(render, 1200);
+    };
     const saveBtn=document.getElementById("saveDraft");
     if(saveBtn) saveBtn.onclick=()=>{ log(r, "Draft saved by "+t.name); alert("Draft saved."); };
     const subBtn=document.getElementById("submitMarks");
@@ -2537,9 +2621,13 @@ function renderPrincipalDash(){
         detailHtml = `<p class="locked-note">Class teacher has not started this exam yet.</p>`;
       } else {
         const roster = studentsForClass(classKey);
-        const subjHeaders = rr.subjects.map(s=>`<th>${s.name}<br><span style="font-weight:400;font-size:10.5px;">/ ${s.maxMarks}</span></th>`).join("");
+        const subjHeaders = rr.subjects.map(s=>{
+          const inactive = Number(s.maxMarks)===0;
+          return `<th style="${inactive?'opacity:0.5;':''}">${s.name}<br><span style="font-weight:400;font-size:10.5px;">${inactive?'Not held':'/ '+s.maxMarks}</span></th>`;
+        }).join("");
         const rows2 = roster.map(s=>{
           const cells = rr.subjects.map(sub=>{
+            if(Number(sub.maxMarks)===0) return `<td style="background:#f2f2f2;text-align:center;color:var(--muted);">—</td>`;
             const m = markFor(rr, s.roll, sub.name);
             return `<td>${m!==""&&m!=null?m:"—"}</td>`;
           }).join("");
@@ -3515,6 +3603,7 @@ function renderStudentDash(){
     const ov = studentOverall(rr, stu.roll);
     if(!ov) return null;
     const subjRows = rr.subjects.map(sub=>{
+      if(Number(sub.maxMarks)===0) return ""; // not held for this exam
       const m = markFor(rr, stu.roll, sub.name);
       if(m===""||m==null) return "";
       return `<tr><td>${sub.name}</td><td>${m} / ${sub.maxMarks}</td><td class="gradecell">${grade(m, sub.maxMarks)}</td></tr>`;
@@ -3606,6 +3695,11 @@ if(SCHOOL_LOGO){
   if(logoImg){ logoImg.src = SCHOOL_LOGO; logoImg.style.display = "block"; }
 }
 bootstrapFirebase();
+if('serviceWorker' in navigator){
+  window.addEventListener('load', ()=>{
+    navigator.serviceWorker.register('service-worker.js').catch(()=>{});
+  });
+}
 </script>
 </body>
 </html>
