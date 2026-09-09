@@ -3308,6 +3308,19 @@ function renderAdminStudentPanel(panelTabs){
   }
   list = list.sort((a,b)=>a.roll.localeCompare(b.roll));
 
+  // Flag possible accidental duplicates (same name + same class) so the admin can spot
+  // and clean up any leftover records from a stale-edit glitch.
+  const nameCounts = {};
+  STUDENTS.forEach(s=>{ const key=s.cls+"-"+s.section+"|"+s.name.trim().toLowerCase(); nameCounts[key]=(nameCounts[key]||0)+1; });
+  const dupes = STUDENTS.filter(s=> nameCounts[s.cls+"-"+s.section+"|"+s.name.trim().toLowerCase()] > 1);
+  const dupeWarning = dupes.length ? `
+    <div class="locked-note" style="border-color:var(--red);background:#fdf1f1;">
+      <b>⚠️ Possible duplicate students found</b> — same name appears more than once in the same class. Please check and delete whichever record is wrong:
+      <ul style="margin:6px 0 0 18px;padding:0;">
+        ${dupes.map(s=>`<li>${classLabel(s.cls+"-"+s.section)} — <b>${s.name}</b> (Roll ${s.roll}, Mobile: ${s.mobile||"—"})</li>`).join("")}
+      </ul>
+    </div>` : "";
+
   const rows = list.map(s=>`
     <tr>
       <td>${s.roll}</td><td>${s.name}</td><td>${s.mobile||"—"}</td><td>${s.dob||"—"}</td><td>${s.house||"—"}</td>
@@ -3324,6 +3337,7 @@ function renderAdminStudentPanel(panelTabs){
       <p style="color:var(--muted);font-size:13px;">${actor.designation}</p>
       ${panelTabs}
 
+      ${dupeWarning}
       <h4 style="color:var(--navy);margin-bottom:6px;">${editing ? "Edit Student" : "Add New Student"}</h4>
       <label>Class</label>
       <select id="stuClass">${editClassOptions}</select>
@@ -3346,6 +3360,17 @@ function renderAdminStudentPanel(panelTabs){
       <div class="success" id="stuOk"></div>
       <button class="btn btn-primary" id="stuSubmit">${editing ? "Save Changes" : "Add Student"}</button>
       ${editing ? `<button class="btn btn-outline" id="stuCancelEdit">Cancel Edit</button>` : ""}
+
+      <div class="locked-note" style="margin-top:20px;">
+        <b>📋 Bulk Fix Mobile/DOB (paste from Excel/register)</b> — first line: column names <code>Roll,Mobile,DOB</code>. Following lines: one student per line, in that order. DOB format: YYYY-MM-DD. Leave DOB blank to only update Mobile.
+        <textarea id="stuBulkBox" rows="5" style="margin-top:8px;" placeholder="Roll,Mobile,DOB
+9A01,9876543210,2011-11-08
+9A02,9876543211,2012-07-16"></textarea>
+        <select id="stuBulkClass" style="margin-top:8px;">${classOptions}</select>
+        <button class="btn btn-outline btn-sm" id="stuBulkBtn" style="margin-top:6px;">Import</button>
+        <div class="error" id="stuBulkErr"></div>
+        <div class="success" id="stuBulkOk"></div>
+      </div>
 
       <h4 style="color:var(--navy);margin-top:24px;margin-bottom:10px;">Student List</h4>
       <div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:12px;">
@@ -3401,6 +3426,12 @@ function renderAdminStudentPanel(panelTabs){
       editing.cls = cls; editing.section = section; editing.name = name;
       editing.mobile = mobile; editing.dob = dob; editing.house = house; editing.admno = admno; editing.photo = photo;
       studentEditingRoll = null;
+    } else if(studentEditingRoll){
+      // We were trying to edit someone, but their record could not be found anymore
+      // (e.g. their Roll No changed on another device since this screen was opened).
+      // Refuse to silently create a duplicate — make the person re-open Edit instead.
+      errEl.textContent = "This student's record could not be found (it may have just changed elsewhere). Please refresh the page and click Edit again.";
+      return;
     } else {
       let roll = rollInput;
       if(!roll) roll = nextRollFor(cls, section);
@@ -3410,6 +3441,38 @@ function renderAdminStudentPanel(panelTabs){
     if(persistStudents()){
       document.getElementById("stuOk").textContent = editing ? "Changes saved." : "Student added.";
       setTimeout(render, 600);
+    }
+  };
+
+  document.getElementById("stuBulkBtn").onclick=()=>{
+    const text = document.getElementById("stuBulkBox").value.trim();
+    const classKey = document.getElementById("stuBulkClass").value;
+    const cls = classKey.split("-")[0], section = classKey.split("-")[1];
+    const errEl = document.getElementById("stuBulkErr"); errEl.textContent="";
+    const okEl = document.getElementById("stuBulkOk"); okEl.textContent="";
+    if(!text){ errEl.textContent="Please paste rows first, including the header line."; return; }
+    const lines = text.split("\n").map(l=>l.trim()).filter(l=>l);
+    if(lines.length<2){ errEl.textContent="Need a header line (Roll,Mobile,DOB) plus at least one student row."; return; }
+    const headerCells = lines[0].split(/\t|,/).map(c=>c.trim().toLowerCase());
+    const rollIdx = headerCells.indexOf("roll");
+    const mobileIdx = headerCells.indexOf("mobile");
+    const dobIdx = headerCells.indexOf("dob");
+    if(rollIdx===-1){ errEl.textContent="Header line must include 'Roll'."; return; }
+    let updated=0, notFound=[];
+    lines.slice(1).forEach(line=>{
+      const parts = line.split(/\t|,/).map(p=>p.trim());
+      const roll = parts[rollIdx];
+      const stu = STUDENTS.find(s=>s.roll.toLowerCase()===roll.toLowerCase() && s.cls===cls && s.section===section);
+      if(!stu){ notFound.push(roll); return; }
+      if(mobileIdx>-1 && parts[mobileIdx]) stu.mobile = parts[mobileIdx];
+      if(dobIdx>-1 && parts[dobIdx]) stu.dob = parts[dobIdx];
+      updated++;
+    });
+    if(persistStudents()){
+      let msg = `Updated ${updated} student(s) in ${classLabel(classKey)}.`;
+      if(notFound.length) msg += " Roll(s) not found in this class: "+notFound.join(", ")+".";
+      okEl.textContent = msg;
+      setTimeout(render, 900);
     }
   };
 
