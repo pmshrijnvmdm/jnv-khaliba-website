@@ -587,7 +587,7 @@ function examsForClass(classKey){
 function studentsForClass(key){
   const [cls, ...rest] = key.split("-");
   const section = rest.join("-");
-  return STUDENTS.filter(s=>s.cls===cls && s.section===section);
+  return STUDENTS.filter(s=>s.cls===cls && s.section===section).sort((a,b)=>a.roll.localeCompare(b.roll, undefined, {numeric:true}));
 }
 function classNumber(classKey){ return classKey.split("-")[0]; }
 function subjectGroupLabel(key){
