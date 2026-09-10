@@ -2012,6 +2012,82 @@ function renderTeacherAccountPanel(t, panelTabs){
 }
 
 /* ---------------- TEACHER: ATTENDANCE ENTRY (Class Teacher + Associate Class Teacher) ---------------- */
+const ATTENDANCE_SHEET_ID = "1OruE_SdPMEOOc94TQdTc4Lf2O3RjGfOsWqcdMtB7HNo";
+const ATTENDANCE_SHEET_TAB_NAMES = {
+  "6-A":"6A", "6-B":"6b", "7-A":"7A", "7-B":"7B", "8-A":"8A", "8-B":"8B",
+  "9-A":"9", "10-A":"10", "11-A":"11A", "11-B":"11 B", "12-A":"12A", "12-B":"12B"
+};
+function parseCsvLine(line){
+  // minimal CSV parser handling quoted fields with commas inside
+  const out = []; let cur = ""; let inQuotes = false;
+  for(let i=0;i<line.length;i++){
+    const c = line[i];
+    if(inQuotes){
+      if(c === '"' && line[i+1] === '"'){ cur += '"'; i++; }
+      else if(c === '"'){ inQuotes = false; }
+      else cur += c;
+    } else {
+      if(c === '"') inQuotes = true;
+      else if(c === ',') { out.push(cur); cur = ""; }
+      else cur += c;
+    }
+  }
+  out.push(cur);
+  return out;
+}
+async function syncAttendanceFromSheet(classKey){
+  const tabName = ATTENDANCE_SHEET_TAB_NAMES[classKey];
+  if(!tabName) throw new Error("No master-sheet tab is mapped for this class.");
+  const url = `https://docs.google.com/spreadsheets/d/${ATTENDANCE_SHEET_ID}/gviz/tq?tqx=out:csv&sheet=${encodeURIComponent(tabName)}`;
+  const res = await fetch(url);
+  if(!res.ok) throw new Error("Could not reach the master sheet (it may not be shared as 'Anyone with the link').");
+  const text = await res.text();
+  const lines = text.split(/\r?\n/).filter(l=>l.trim());
+  const rows = lines.map(parseCsvLine);
+
+  // Find the header row (the one containing "Roll" in some cell) and use its cell
+  // positions to figure out which column is which, rather than assuming fixed letters.
+  let headerIdx = -1, headerRow = null;
+  for(let i=0;i<rows.length;i++){
+    if(rows[i].some(c=>/roll/i.test(c))){ headerIdx = i; headerRow = rows[i]; break; }
+  }
+  if(headerIdx === -1) throw new Error("Could not find the header row (a cell containing 'Roll') in this sheet tab.");
+
+  const rollCol = headerRow.findIndex(c=>/roll/i.test(c));
+  const monthCols = {};
+  ATTENDANCE_MONTHS.forEach(m=>{
+    const idx = headerRow.findIndex(c=>c.trim().toLowerCase()===m.toLowerCase());
+    if(idx>-1) monthCols[m] = idx;
+  });
+  const workingDaysHeaderIdx = rows.findIndex(r=>r.some(c=>/working\s*days/i.test(c)));
+
+  const att = getClassAttendance(classKey);
+  if(workingDaysHeaderIdx>-1 && workingDaysHeaderIdx < headerIdx){
+    const wdRow = rows[workingDaysHeaderIdx];
+    ATTENDANCE_MONTHS.forEach(m=>{
+      const idx = monthCols[m];
+      if(idx!=null && wdRow[idx] && !isNaN(Number(wdRow[idx]))) att.workingDays[m] = Number(wdRow[idx]);
+    });
+  }
+
+  let updated = 0;
+  for(let i=headerIdx+1;i<rows.length;i++){
+    const row = rows[i];
+    const roll = (row[rollCol]||"").trim();
+    if(!roll) continue;
+    if(!att.records[roll]) att.records[roll] = {};
+    ATTENDANCE_MONTHS.forEach(m=>{
+      const idx = monthCols[m];
+      if(idx==null) return;
+      const val = (row[idx]||"").trim();
+      if(val !== "" && !isNaN(Number(val))) att.records[roll][m] = Number(val);
+    });
+    updated++;
+  }
+  saveDB();
+  return updated;
+}
+
 function renderTeacherAttendancePanel(t, panelTabs, classKey, isAssociate){
   const roster = studentsForClass(classKey);
   const att = getClassAttendance(classKey);
@@ -2036,7 +2112,12 @@ function renderTeacherAttendancePanel(t, panelTabs, classKey, isAssociate){
       ${teacherHeaderHtml(t, t.designation+" · "+(isAssociate?"Associate Class Teacher":"Class Teacher")+": <b>"+classLabel(classKey)+"</b>")}
       ${panelTabs}
       <div class="locked-note">Enter the number of days <b>present</b> for each student, month by month. Working days per month can be adjusted if a month had holidays/exams.</div>
-      <p style="margin:10px 0;"><a href="${ATTENDANCE_SHEET_LINK}" target="_blank" rel="noopener"><button class="btn btn-outline btn-sm">📄 Open Master Attendance Sheet</button></a></p>
+      <p style="margin:10px 0;">
+        <a href="${ATTENDANCE_SHEET_LINK}" target="_blank" rel="noopener"><button class="btn btn-outline btn-sm" style="margin-right:8px;">📄 Open Master Attendance Sheet</button></a>
+        ${ATTENDANCE_SHEET_TAB_NAMES[classKey] ? `<button class="btn btn-primary btn-sm" id="syncAttBtn">🔄 Sync from Master Sheet</button>` : ""}
+      </p>
+      <div class="error" id="syncAttErr"></div>
+      <div class="success" id="syncAttOk"></div>
       <div class="scrollbox">
         <table>
           <tr><th>Roll</th><th>Name</th>${monthHeaders}<th>Total Present</th><th>Total Working</th><th>%</th></tr>
@@ -2046,6 +2127,20 @@ function renderTeacherAttendancePanel(t, panelTabs, classKey, isAssociate){
       </div>
     </div>
   `;
+  const syncBtn = document.getElementById("syncAttBtn");
+  if(syncBtn) syncBtn.onclick=async ()=>{
+    const errEl = document.getElementById("syncAttErr"); errEl.textContent="";
+    const okEl = document.getElementById("syncAttOk"); okEl.textContent="";
+    syncBtn.disabled = true; syncBtn.textContent = "Syncing...";
+    try{
+      const count = await syncAttendanceFromSheet(classKey);
+      okEl.textContent = `Synced ${count} student row(s) from the master sheet.`;
+      setTimeout(render, 900);
+    }catch(e){
+      errEl.textContent = "Sync failed: " + e.message;
+      syncBtn.disabled = false; syncBtn.textContent = "🔄 Sync from Master Sheet";
+    }
+  };
   document.getElementById("back").onclick=()=>{session=null;teacherPanel="marks";go("home");};
   document.getElementById("tabMarks").onclick=()=>{ teacherPanel="marks"; render(); };
   document.getElementById("tabStudents").onclick=()=>{ teacherPanel="students"; render(); };
