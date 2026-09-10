@@ -183,6 +183,7 @@ input.mark-box{width:70px;padding:6px 8px;}
       <button data-r="notices">Notices</button>
       <button data-r="facilities">Facilities</button>
       <button data-r="toppers">Toppers</button>
+      <button data-r="houses">Houses</button>
       <button data-r="gallery">Gallery</button>
       <button data-r="careers">Careers</button>
       <button data-r="contact">Contact</button>
@@ -289,6 +290,12 @@ function defaultDB(){
     careers:{}, careerCounter:0,
     blogs:{}, blogCounter:0, careerGuides:{}, careerGuideCounter:0,
     facilityPhotos:{}, clCreditedYears:{}, attendance:{},
+    houseStaff: {
+      "Aravali":  { srBoysHM:"Sh. Amit Kumar Singh, PGT (Bio)", srBoysAHM:"Mr. Divya Prakash Singh Rawal, PGT (CS)", jrBoysHM:"Mr. Rajesh Kumar, PGT (Geo)", jrBoysAHM:"Mr. Ramdas, TGT (Hindi)", srGirlsHM:"Nidhi Kumari, PGT (English)", srGirlsAHM:"Mrs. Smita Rani Pillai (Staff Nurse)", jrGirlsHM:"Mrs. Olima Kanchan Lata Lakra, TGT (SSt)", jrGirlsAHM:"Ms. Priyanka Maurya, TGT (Hindi)" },
+      "Nilgiri":  { srBoysHM:"Sh. D. K. Shukla, PGT (History)", srBoysAHM:"Mr. Surendra Pal, PGT (Hindi)", jrBoysHM:"Mr. Sunil Lakra, TGT (English)", jrBoysAHM:"Mr. Ankit Tripathi, (TGT Music)", srGirlsHM:"Nidhi Kumari, PGT (English)", srGirlsAHM:"Mrs. Smita Rani Pillai (Staff Nurse)", jrGirlsHM:"Mrs. Olima Kanchan Lata Lakra, TGT (SSt)", jrGirlsAHM:"Ms. Priyanka Maurya, TGT (Hindi)" },
+      "Shiwalik": { srBoysHM:"Sh. Ankit Kumar Pandey, PGT (Eco)", srBoysAHM:"Mr. Ajay Kumar Pandey, PET (M)", jrBoysHM:"Mr. Rahul Mudgal, PGT (Chemistry)", jrBoysAHM:"Mr. Ramdas, TGT (Hindi) / PGT Physics", srGirlsHM:"Mrs. Amlawati Lakra, TGT (Science)", srGirlsAHM:"Mrs. Salomi Ekka, PET (F)", jrGirlsHM:"Mrs. Swati Sriwastav, TGT (Eng)", jrGirlsAHM:"Ms. Priyanka Maurya, TGT (Hindi)" },
+      "Udaygiri": { srBoysHM:"Sh. Abhishek Singh, PGT (Maths)", srBoysAHM:"Sh. S.K. Suman, (TGT Library)", jrBoysHM:"Mr. Ishtkhar Alam, (TGT Maths)", jrBoysAHM:"Mr. Ankit Tripathi, (TGT Music) / TGT Gujarati", srGirlsHM:"Mrs. Amlawati Lakra, TGT (Science)", srGirlsAHM:"Mrs. Salomi Ekka, PET (F)", jrGirlsHM:"Mrs. Swati Sriwastav, TGT (Eng)", jrGirlsAHM:"Ms. Priyanka Maurya, TGT (Hindi)" }
+    },
     homeVideo:null, homeSlides:{}, homeSlideCounter:0,
     siteContact:{ phone:"+91 7775-XXXXXX", email:"jnvsarguja@nvsrobpt.in" } };
 }
@@ -472,7 +479,7 @@ async function bootstrapFirebase(){
   // Only auto-refresh screens where it's safe (public/read-only pages, or list views that
   // aren't mid-edit). Everywhere else (logins, marks entry, forms, dashboards) is left alone
   // so a save from a different device never wipes out what someone is actively typing.
-  const SAFE_TO_AUTO_RERENDER = ["home","about","academics","facilities","faculty","pyq","elibrary","notices","toppers","gallery","careers","contact","instituteChoice"];
+  const SAFE_TO_AUTO_RERENDER = ["home","about","academics","facilities","faculty","pyq","elibrary","notices","toppers","houses","gallery","careers","contact","instituteChoice"];
   function safeRerender(){ if(SAFE_TO_AUTO_RERENDER.includes(route)) render(); }
   mainRef.onSnapshot(snap=>{
     if(suppressNextSnapshot.main){ suppressNextSnapshot.main=false; return; }
@@ -790,6 +797,7 @@ function wirePrincipalTabs(){
   const n = document.getElementById("pTabNotices"); if(n) n.onclick=()=>{ principalPanel="notices"; render(); };
   const g = document.getElementById("pTabGallery"); if(g) g.onclick=()=>{ principalPanel="gallery"; render(); };
   const c = document.getElementById("pTabCareers"); if(c) c.onclick=()=>{ principalPanel="careers"; render(); };
+  const ho = document.getElementById("pTabHouses"); if(ho) ho.onclick=()=>{ principalPanel="houses"; render(); };
   const s = document.getElementById("pTabStaff"); if(s) s.onclick=()=>{ principalPanel="staff"; render(); };
   const st = document.getElementById("pTabStudents"); if(st) st.onclick=()=>{ principalPanel="students"; render(); };
   const se = document.getElementById("pTabSettings"); if(se) se.onclick=()=>{ principalPanel="settings"; render(); };
@@ -836,6 +844,7 @@ function render(){
   if(route==="careerguidance") return renderPublicCareerGuidancePage();
   if(route==="notices") return renderPublicNoticesPage();
   if(route==="toppers") return renderToppersPage();
+  if(route==="houses") return renderHousesPage();
   if(route==="gallery") return renderGalleryPage();
   if(route==="careers") return renderCareers();
   if(route==="contact") return renderContact();
@@ -878,6 +887,7 @@ function footerHtml(){
           <button data-r="about">About</button>
           <button data-r="facilities">Facilities</button>
           <button data-r="toppers">Toppers</button>
+      <button data-r="houses">Houses</button>
           <button data-r="contact">Contact</button>
         </div>
         <div>
@@ -1391,8 +1401,66 @@ function renderToppersPage(){
   wireFooter();
 }
 
-/* ---------------- GALLERY ---------------- */
+/* ---------------- HOUSES — House Master / Assistant House Master directory ---------------- */
+let selectedHouse = null;
+function renderHousesPage(){
+  const cards = HOUSE_NAMES.map(h=>{
+    const sel = selectedHouse===h ? " sel" : "";
+    return `<div class="fac-card click-row${sel}" data-house="${h}"><div class="ic" style="background:${HOUSE_COLORS[h]}">🏠</div><div class="fac-body"><h4>${h} House</h4></div></div>`;
+  }).join("");
+
+  let detailHtml = "";
+  if(selectedHouse){
+    const hs = DB.houseStaff[selectedHouse] || {};
+    const boysStudents = STUDENTS.filter(s=>s.house===selectedHouse && s.gender==="M");
+    const girlsStudents = STUDENTS.filter(s=>s.house===selectedHouse && s.gender==="F");
+    const studentListHtml = (list) => list.length
+      ? `<div class="scrollbox" style="margin-top:8px;"><table><tr><th>Roll</th><th>Name</th><th>Class</th></tr>${list.map(s=>`<tr><td>${s.roll}</td><td>${s.name}</td><td>${classLabel(s.cls+"-"+s.section)}</td></tr>`).join("")}</table></div>`
+      : `<p style="font-size:12px;color:var(--muted);margin-top:8px;">Student list not added yet for this section.</p>`;
+
+    detailHtml = `
+      <div class="card" id="houseDetail" style="border-top:4px solid ${HOUSE_COLORS[selectedHouse]};">
+        <h3 style="color:var(--navy);margin-bottom:14px;">${selectedHouse} House</h3>
+
+        <h4 style="color:var(--navy);font-size:14px;margin-bottom:8px;">👦 Boys</h4>
+        <div class="kv"><span>Senior House Master</span><strong>${hs.srBoysHM||"—"}</strong></div>
+        <div class="kv"><span>Senior Asst. House Master</span><strong>${hs.srBoysAHM||"—"}</strong></div>
+        <div class="kv"><span>Junior House Master</span><strong>${hs.jrBoysHM||"—"}</strong></div>
+        <div class="kv"><span>Junior Asst. House Master</span><strong>${hs.jrBoysAHM||"—"}</strong></div>
+        ${studentListHtml(boysStudents)}
+
+        <h4 style="color:var(--navy);font-size:14px;margin:18px 0 8px;">👧 Girls</h4>
+        <div class="kv"><span>Senior House Master</span><strong>${hs.srGirlsHM||"—"}</strong></div>
+        <div class="kv"><span>Senior Asst. House Master</span><strong>${hs.srGirlsAHM||"—"}</strong></div>
+        <div class="kv"><span>Junior House Master</span><strong>${hs.jrGirlsHM||"—"}</strong></div>
+        <div class="kv"><span>Junior Asst. House Master</span><strong>${hs.jrGirlsAHM||"—"}</strong></div>
+        ${studentListHtml(girlsStudents)}
+      </div>`;
+  }
+
+  app.innerHTML = `
+    <div class="card">
+      <h2 style="color:var(--navy)">School Houses</h2>
+      <p style="font-size:12px;color:var(--muted);margin-top:6px;">Tap a house to see its House Masters, Assistant House Masters, and students.</p>
+      <div class="fac-grid" style="margin-top:14px;">${cards}</div>
+    </div>
+    ${detailHtml}
+    ${footerHtml()}
+  `;
+  document.querySelectorAll("[data-house]").forEach(el=>{
+    el.onclick=()=>{
+      selectedHouse = selectedHouse===el.dataset.house ? null : el.dataset.house;
+      render();
+      if(selectedHouse){ setTimeout(()=>{ const d=document.getElementById("houseDetail"); if(d) d.scrollIntoView({behavior:"smooth", block:"start"}); }, 50); }
+    };
+  });
+  wireFooter();
+}
+
+
 const GALLERY_CATS = ["Achievements","Events","Sports","Campus","Cultural Events","Science Exhibition","Independence Day","PM SHRI Activities"];
+const HOUSE_NAMES = ["Aravali","Nilgiri","Shiwalik","Udaygiri"];
+const HOUSE_COLORS = { "Aravali":"#1E7A46", "Nilgiri":"#14508F", "Shiwalik":"#a13c3c", "Udaygiri":"#E08A1E" };
 
 let lightboxImage = null;
 function renderGalleryPage(){
@@ -2807,6 +2875,7 @@ function renderPrincipalDash(){
       <button class="btn ${principalPanel==='notices'?'btn-primary':'btn-outline'} btn-sm" id="pTabNotices" style="margin-right:8px;">🔔 Notices</button>
       <button class="btn ${principalPanel==='gallery'?'btn-primary':'btn-outline'} btn-sm" id="pTabGallery" style="margin-right:8px;">🖼 Gallery</button>
       <button class="btn ${principalPanel==='careers'?'btn-primary':'btn-outline'} btn-sm" id="pTabCareers" style="margin-right:8px;">💼 Careers</button>
+      <button class="btn ${principalPanel==='houses'?'btn-primary':'btn-outline'} btn-sm" id="pTabHouses" style="margin-right:8px;">🏠 Houses</button>
       ${isAdmin ? `<button class="btn ${principalPanel==='staff'?'btn-primary':'btn-outline'} btn-sm" id="pTabStaff" style="margin-right:8px;">👤 Staff Management</button>` : ""}
       ${isAdmin ? `<button class="btn ${principalPanel==='students'?'btn-primary':'btn-outline'} btn-sm" id="pTabStudents" style="margin-right:8px;">🎓 Student Management</button>` : ""}
       ${isAdmin ? `<button class="btn ${principalPanel==='settings'?'btn-primary':'btn-outline'} btn-sm" id="pTabSettings" style="margin-right:8px;">⚙️ Site Settings</button>` : ""}
@@ -2828,6 +2897,10 @@ function renderPrincipalDash(){
   }
   if(principalPanel === "careers"){
     renderPrincipalCareersPanel(panelTabs);
+    return;
+  }
+  if(principalPanel === "houses"){
+    renderPrincipalHousesPanel(panelTabs);
     return;
   }
   if(principalPanel === "staff" && isAdmin){
@@ -3336,6 +3409,49 @@ function renderPrincipalCareersPanel(panelTabs){
   });
 }
 
+/* ---------------- HOUSES — Principal/Admin can edit HM / AHM per house ---------------- */
+function renderPrincipalHousesPanel(panelTabs){
+  const fields = [
+    ["srBoysHM","Boys — Senior House Master"],["srBoysAHM","Boys — Senior Asst. House Master"],
+    ["jrBoysHM","Boys — Junior House Master"],["jrBoysAHM","Boys — Junior Asst. House Master"],
+    ["srGirlsHM","Girls — Senior House Master"],["srGirlsAHM","Girls — Senior Asst. House Master"],
+    ["jrGirlsHM","Girls — Junior House Master"],["jrGirlsAHM","Girls — Junior Asst. House Master"],
+  ];
+  const sections = HOUSE_NAMES.map(h=>{
+    const hs = DB.houseStaff[h] || {};
+    const rows = fields.map(([key,label])=>`
+      <label>${label}</label>
+      <input class="house-field" data-house="${h}" data-key="${key}" value="${hs[key]||""}" placeholder="Name, Designation">
+    `).join("");
+    return `
+      <div class="card" style="border-top:4px solid ${HOUSE_COLORS[h]};">
+        <h4 style="color:var(--navy);margin-bottom:10px;">${h} House</h4>
+        ${rows}
+      </div>`;
+  }).join("");
+
+  app.innerHTML = `
+    <button class="back-link" id="back">&larr; Logout</button>
+    <div class="card">
+      <h2 style="color:var(--navy)">Welcome, ${currentActor().name}</h2>
+      <p style="color:var(--muted);font-size:13px;">${currentActor().designation}</p>
+      ${panelTabs}
+      <p style="font-size:12px;color:var(--muted);margin-bottom:6px;">Edits save automatically when you click away from a field. This shows live on the public "Houses" page.</p>
+    </div>
+    ${sections}
+  `;
+  document.getElementById("back").onclick=()=>{session=null;go("home");};
+  wirePrincipalTabs();
+  document.querySelectorAll(".house-field").forEach(inp=>{
+    inp.onchange=()=>{
+      const h = inp.dataset.house, key = inp.dataset.key;
+      if(!DB.houseStaff[h]) DB.houseStaff[h] = {};
+      DB.houseStaff[h][key] = inp.value.trim();
+      saveDB();
+    };
+  });
+}
+
 /* ---------------- STAFF MANAGEMENT — Admin only: add/edit/delete Regular & Contractual teachers ---------------- */
 let staffEditingId = null;
 let classAssignEditingId = null;
@@ -3623,7 +3739,16 @@ function renderAdminStudentPanel(panelTabs){
       <label>Date of Birth</label>
       <input id="stuDob" type="date" value="${editing?editing.dob:""}">
       <label>House (optional)</label>
-      <input id="stuHouse" value="${editing?editing.house:""}" placeholder="e.g. Aravali, Nilgiri">
+      <select id="stuHouse">
+        <option value="" ${!editing || !editing.house ? "selected":""}>— Not set —</option>
+        ${HOUSE_NAMES.map(h=>`<option value="${h}" ${editing&&editing.house===h?"selected":""}>${h}</option>`).join("")}
+      </select>
+      <label>Gender (optional — used for House Boys/Girls listing)</label>
+      <select id="stuGender">
+        <option value="" ${!editing || !editing.gender ? "selected":""}>— Not set —</option>
+        <option value="M" ${editing&&editing.gender==='M'?"selected":""}>Boy</option>
+        <option value="F" ${editing&&editing.gender==='F'?"selected":""}>Girl</option>
+      </select>
       <label>Admission No. (optional)</label>
       <input id="stuAdmno" value="${editing?editing.admno:""}" placeholder="Admission number">
       <label>Photo (optional — used on the Toppers page)</label>
@@ -3675,6 +3800,7 @@ function renderAdminStudentPanel(panelTabs){
     const mobile = document.getElementById("stuMobile").value.trim();
     const dob = document.getElementById("stuDob").value;
     const house = document.getElementById("stuHouse").value.trim();
+    const gender = document.getElementById("stuGender").value;
     const admno = document.getElementById("stuAdmno").value.trim();
     const rollInput = document.getElementById("stuRoll").value.trim();
     const photoFile = document.getElementById("stuPhoto").files[0];
@@ -3696,7 +3822,7 @@ function renderAdminStudentPanel(panelTabs){
       }
       editing.roll = rollInput;
       editing.cls = cls; editing.section = section; editing.name = name;
-      editing.mobile = mobile; editing.dob = dob; editing.house = house; editing.admno = admno; editing.photo = photo;
+      editing.mobile = mobile; editing.dob = dob; editing.house = house; editing.gender = gender; editing.admno = admno; editing.photo = photo;
       studentEditingRoll = null;
     } else if(studentEditingRoll){
       // We were trying to edit someone, but their record could not be found anymore
@@ -3708,7 +3834,7 @@ function renderAdminStudentPanel(panelTabs){
       let roll = rollInput;
       if(!roll) roll = nextRollFor(cls, section);
       if(STUDENTS.find(s=>s.roll===roll)){ errEl.textContent="That Roll No already exists in this class."; return; }
-      STUDENTS.push({ roll, name, cls, section, dob, mobile, house, admno, photo, password: nextStudentPassword(name) });
+      STUDENTS.push({ roll, name, cls, section, dob, mobile, house, gender, admno, photo, password: nextStudentPassword(name) });
     }
     if(persistStudents()){
       document.getElementById("stuOk").textContent = editing ? "Changes saved." : "Student added.";
