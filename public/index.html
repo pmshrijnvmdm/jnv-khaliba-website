@@ -158,6 +158,7 @@ input.mark-box{width:70px;padding:6px 8px;}
 <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-app-check-compat.js"></script>
 <script src="https://www.google.com/recaptcha/enterprise.js?render=6LdciaOtAAAAAETSkpgutNnRQ99JWGbkecvBHdFn"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 </head>
 <body>
 <header class="top">
@@ -2035,6 +2036,52 @@ function parseCsvLine(line){
   out.push(cur);
   return out;
 }
+/* ---------------- EXCEL DOWNLOADS (Exam Department) ---------------- */
+function downloadAttendanceExcel(classKey){
+  const roster = studentsForClass(classKey);
+  const att = getClassAttendance(classKey);
+  const title = `CLASS ${classLabel(classKey).replace("Class ","").toUpperCase()} — ATTENDANCE REGISTER — SESSION 2026-27 (APRIL 2026 to MARCH 2027)`;
+  const totalWorking = ATTENDANCE_MONTHS.reduce((s,m)=>s+(Number(att.workingDays[m])||0),0);
+
+  const headerRow1 = ["", "Working Days ->", ...ATTENDANCE_MONTHS.map(m=>att.workingDays[m]), totalWorking, "", ""];
+  const headerRow2 = ["Roll No.", "Student Name", ...ATTENDANCE_MONTHS, "Total Present", "Total Working Days", "% Attendance"];
+  const dataRows = roster.map(s=>{
+    const row = studentAttendanceRow(classKey, s.roll);
+    const totals = attendanceTotals(classKey, s.roll);
+    const monthVals = ATTENDANCE_MONTHS.map(m=> row[m]!=null && row[m]!=="" ? row[m] : "");
+    return [s.roll, s.name, ...monthVals, totals.present, totals.working, totals.working>0 ? (totals.pct.toFixed(1)+"%") : "0.0%"];
+  });
+
+  const aoa = [[title], [], headerRow1, headerRow2, ...dataRows];
+  const ws = XLSX.utils.aoa_to_sheet(aoa);
+  ws['!merges'] = [{ s:{r:0,c:0}, e:{r:0,c:16} }];
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, classLabel(classKey).replace("Class ",""));
+  XLSX.writeFile(wb, `Attendance_${classLabel(classKey).replace(/\s+/g,"_")}_2026-27.xlsx`);
+}
+function downloadMarksExcel(classKey, examKey){
+  const roster = studentsForClass(classKey);
+  const rr = DB.results[resultKey(classKey, examKey)];
+  if(!rr){ alert("No marks have been entered for this exam yet."); return; }
+  const activeSubjects = rr.subjects.filter(s=>Number(s.maxMarks)!==0);
+  const title = `${classLabel(classKey).toUpperCase()} — ${examLabel(examKey).toUpperCase()} — RESULT — SESSION 2026-27`;
+  const headerRow = ["Roll No", "Student Name", ...activeSubjects.map(s=>s.name), "Total", "%", "Grade"];
+  const dataRows = roster.map(s=>{
+    const ov = studentOverall(rr, s.roll);
+    const marksVals = activeSubjects.map(sub=>{
+      const m = markFor(rr, s.roll, sub.name);
+      return m!==""&&m!=null ? m : "AB";
+    });
+    return [s.roll, s.name, ...marksVals, ov?ov.scored:"—", ov?ov.pct.toFixed(2):"—", ov?grade(ov.pct,100):"—"];
+  });
+  const aoa = [[title], [], headerRow, ...dataRows];
+  const ws = XLSX.utils.aoa_to_sheet(aoa);
+  ws['!merges'] = [{ s:{r:0,c:0}, e:{r:0,c:headerRow.length-1} }];
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, examLabel(examKey).replace(/[^A-Za-z0-9]/g,"").slice(0,28) || "Result");
+  XLSX.writeFile(wb, `Marks_${classLabel(classKey).replace(/\s+/g,"_")}_${examKey}_2026-27.xlsx`);
+}
+
 function fetchGvizRows(sheetId, tabName){
   // Google Sheets doesn't send CORS headers on its CSV/JSON export endpoints, so a plain
   // fetch() gets blocked by the browser even on a fully public sheet. The documented
@@ -2141,7 +2188,6 @@ function renderTeacherAttendancePanel(t, panelTabs, classKey, isAssociate){
       ${panelTabs}
       <div class="locked-note">Enter the number of days <b>present</b> for each student, month by month. Working days per month can be adjusted if a month had holidays/exams.</div>
       <p style="margin:10px 0;">
-        <a href="${ATTENDANCE_SHEET_LINK}" target="_blank" rel="noopener"><button class="btn btn-outline btn-sm" style="margin-right:8px;">📄 Open Master Attendance Sheet</button></a>
         ${ATTENDANCE_SHEET_TAB_NAMES[classKey] ? `<button class="btn btn-primary btn-sm" id="syncAttBtn">🔄 Sync from Master Sheet</button>` : ""}
       </p>
       <div class="error" id="syncAttErr"></div>
@@ -2266,11 +2312,11 @@ function renderExamDeptPanel(){
   if(examDeptPanel === "attendance"){
     const rows = CLASS_LIST.map(c=>{
       const roster = studentsForClass(c.key);
-      if(!roster.length) return `<tr><td>${c.label}</td><td colspan="2" style="color:var(--muted)">No students</td></tr>`;
+      if(!roster.length) return `<tr><td>${c.label}</td><td colspan="3" style="color:var(--muted)">No students</td></tr>`;
       let sumPct=0;
       roster.forEach(s=>{ sumPct += attendanceTotals(c.key, s.roll).pct; });
       const avg = sumPct/roster.length;
-      return `<tr><td>${c.label}</td><td>${roster.length}</td><td><b>${avg.toFixed(1)}%</b></td></tr>`;
+      return `<tr><td>${c.label}</td><td>${roster.length}</td><td><b>${avg.toFixed(1)}%</b></td><td><button class="btn btn-outline btn-sm" data-dlatt="${c.key}">⬇ Excel</button></td></tr>`;
     }).join("");
     app.innerHTML = `
       <button class="back-link" id="back">&larr; Logout</button>
@@ -2279,8 +2325,7 @@ function renderExamDeptPanel(){
         <p style="color:var(--muted);font-size:13px;">${actor.designation}</p>
         ${panelTabs}
         <h4 style="color:var(--navy);margin-bottom:10px;">Class-wise Average Attendance — Session 2026-27</h4>
-        <p style="margin-bottom:10px;"><a href="${ATTENDANCE_SHEET_LINK}" target="_blank" rel="noopener"><button class="btn btn-outline btn-sm">📄 Open Master Attendance Sheet</button></a></p>
-        <div class="scrollbox"><table><tr><th>Class</th><th>Students</th><th>Avg. Attendance</th></tr>${rows}</table></div>
+        <div class="scrollbox"><table><tr><th>Class</th><th>Students</th><th>Avg. Attendance</th><th></th></tr>${rows}</table></div>
       </div>
     `;
     document.getElementById("back").onclick=()=>{session=null;go("home");};
@@ -2288,6 +2333,9 @@ function renderExamDeptPanel(){
     document.getElementById("edTabAttendance").onclick=()=>{ examDeptPanel="attendance"; render(); };
     document.getElementById("edTabPyq").onclick=()=>{ examDeptPanel="pyq"; render(); };
     document.getElementById("edTabAccount").onclick=()=>{ examDeptPanel="account"; render(); };
+    document.querySelectorAll("[data-dlatt]").forEach(btn=>{
+      btn.onclick=()=>downloadAttendanceExcel(btn.dataset.dlatt);
+    });
     return;
   }
 
@@ -2304,7 +2352,8 @@ function renderExamDeptPanel(){
         const status = rr ? rr.status : "notstarted";
         const label = status==="notstarted" ? "Not filled" : status==="draft" ? "In progress" : status==="submitted" ? "Submitted" : "Published";
         const cls = status==="notstarted" ? "draft" : status;
-        return `<div style="margin-bottom:4px;"><span style="color:var(--muted);">${e.label}:</span> <span class="status ${cls}">${label}</span></div>`;
+        const canDownload = status==="submitted" || status==="published";
+        return `<div style="margin-bottom:4px;"><span style="color:var(--muted);">${e.label}:</span> <span class="status ${cls}">${label}</span> ${canDownload ? `<button class="btn btn-outline btn-sm" data-dlmarks="${c.key}|${e.key}" style="padding:2px 8px;font-size:11px;margin-left:4px;">⬇ Excel</button>` : ""}</div>`;
       }).join("");
       return `<tr><td>${c.label}</td><td>${teacherName}</td><td>${examCells}</td></tr>`;
     }).join("");
@@ -2316,6 +2365,7 @@ function renderExamDeptPanel(){
         <p style="color:var(--muted);font-size:13px;">${actor.designation}</p>
         ${panelTabs}
         <h4 style="color:var(--navy);margin-bottom:10px;">Which teachers have filled marks — class by class</h4>
+        <p style="font-size:12px;color:var(--muted);margin-bottom:10px;">Once an exam is <b>Submitted</b> or <b>Published</b>, you can download its marks as an Excel file.</p>
         <div class="scrollbox"><table><tr><th>Class</th><th>Class Teacher</th><th>Exam-wise Status</th></tr>${rows}</table></div>
       </div>
     `;
@@ -2324,6 +2374,12 @@ function renderExamDeptPanel(){
     document.getElementById("edTabAttendance").onclick=()=>{ examDeptPanel="attendance"; render(); };
     document.getElementById("edTabPyq").onclick=()=>{ examDeptPanel="pyq"; render(); };
     document.getElementById("edTabAccount").onclick=()=>{ examDeptPanel="account"; render(); };
+    document.querySelectorAll("[data-dlmarks]").forEach(btn=>{
+      btn.onclick=()=>{
+        const [classKey, examKey] = btn.dataset.dlmarks.split("|");
+        downloadMarksExcel(classKey, examKey);
+      };
+    });
     return;
   }
 
