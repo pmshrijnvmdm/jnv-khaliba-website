@@ -1659,6 +1659,7 @@ function renderTeacherDash(){
   const panelTabs = `
     <div style="margin-bottom:16px;">
       <button class="btn ${teacherPanel==='marks'?'btn-primary':'btn-outline'} btn-sm" id="tabMarks" style="margin-right:8px;">📝 Marks Entry</button>
+      <button class="btn ${teacherPanel==='students'?'btn-primary':'btn-outline'} btn-sm" id="tabStudents" style="margin-right:8px;">👨‍👩‍👧 My Students</button>
       <button class="btn ${teacherPanel==='attendance'?'btn-primary':'btn-outline'} btn-sm" id="tabAttendance" style="margin-right:8px;">📋 Attendance</button>
       <button class="btn ${teacherPanel==='leave'?'btn-primary':'btn-outline'} btn-sm" id="tabLeave" style="margin-right:8px;">🗓 Leave Application</button>
       <button class="btn ${teacherPanel==='account'?'btn-primary':'btn-outline'} btn-sm" id="tabAccount">🔑 Change / Forgot Password</button>
@@ -1676,6 +1677,10 @@ function renderTeacherDash(){
     renderTeacherAttendancePanel(t, panelTabs, classKey, isAssociate);
     return;
   }
+  if(teacherPanel === "students" && classKey!=="NONE"){
+    renderTeacherStudentsPanel(t, panelTabs, classKey, isAssociate);
+    return;
+  }
 
   if(classKey === "NONE"){
     app.innerHTML = `
@@ -1691,6 +1696,7 @@ function renderTeacherDash(){
     document.getElementById("tabLeave").onclick=()=>{ teacherPanel="leave"; render(); };
     document.getElementById("tabAccount").onclick=()=>{ teacherPanel="account"; render(); };
   const tabAttBtn = document.getElementById("tabAttendance"); if(tabAttBtn) tabAttBtn.onclick=()=>{ teacherPanel="attendance"; render(); };
+  const tabStuBtn = document.getElementById("tabStudents"); if(tabStuBtn) tabStuBtn.onclick=()=>{ teacherPanel="students"; render(); };
     const pyqBtn = document.getElementById("tabPyq");
     if(pyqBtn) pyqBtn.onclick=()=>{ teacherPanel="pyq"; render(); };
     const libBtn = document.getElementById("tabLibrary");
@@ -1792,6 +1798,7 @@ function renderTeacherDash(){
   document.getElementById("tabLeave").onclick=()=>{ teacherPanel="leave"; render(); };
   document.getElementById("tabAccount").onclick=()=>{ teacherPanel="account"; render(); };
   const tabAttBtn = document.getElementById("tabAttendance"); if(tabAttBtn) tabAttBtn.onclick=()=>{ teacherPanel="attendance"; render(); };
+  const tabStuBtn = document.getElementById("tabStudents"); if(tabStuBtn) tabStuBtn.onclick=()=>{ teacherPanel="students"; render(); };
   const pyqTabBtn = document.getElementById("tabPyq");
   if(pyqTabBtn) pyqTabBtn.onclick=()=>{ teacherPanel="pyq"; render(); };
   const libTabBtn = document.getElementById("tabLibrary");
@@ -1944,9 +1951,11 @@ function renderTeacherLeavePanel(t, panelTabs){
   document.getElementById("lvBalanceBox").onclick=()=>{ leaveBalanceExpanded = !leaveBalanceExpanded; render(); };
   document.getElementById("back").onclick=()=>{session=null;teacherPanel="marks";go("home");};
   document.getElementById("tabMarks").onclick=()=>{ teacherPanel="marks"; render(); };
+  document.getElementById("tabStudents").onclick=()=>{ teacherPanel="students"; render(); };
   document.getElementById("tabLeave").onclick=()=>{ teacherPanel="leave"; render(); };
   document.getElementById("tabAccount").onclick=()=>{ teacherPanel="account"; render(); };
   const tabAttBtn = document.getElementById("tabAttendance"); if(tabAttBtn) tabAttBtn.onclick=()=>{ teacherPanel="attendance"; render(); };
+  const tabStuBtn = document.getElementById("tabStudents"); if(tabStuBtn) tabStuBtn.onclick=()=>{ teacherPanel="students"; render(); };
   const pyqTabBtn2 = document.getElementById("tabPyq");
   if(pyqTabBtn2) pyqTabBtn2.onclick=()=>{ teacherPanel="pyq"; render(); };
   const libTabBtn2 = document.getElementById("tabLibrary");
@@ -1990,9 +1999,11 @@ function renderTeacherAccountPanel(t, panelTabs){
   `;
   document.getElementById("back").onclick=()=>{session=null;teacherPanel="marks";go("home");};
   document.getElementById("tabMarks").onclick=()=>{ teacherPanel="marks"; render(); };
+  document.getElementById("tabStudents").onclick=()=>{ teacherPanel="students"; render(); };
   document.getElementById("tabLeave").onclick=()=>{ teacherPanel="leave"; render(); };
   document.getElementById("tabAccount").onclick=()=>{ teacherPanel="account"; render(); };
   const tabAttBtn = document.getElementById("tabAttendance"); if(tabAttBtn) tabAttBtn.onclick=()=>{ teacherPanel="attendance"; render(); };
+  const tabStuBtn = document.getElementById("tabStudents"); if(tabStuBtn) tabStuBtn.onclick=()=>{ teacherPanel="students"; render(); };
   const pyqTabBtn3 = document.getElementById("tabPyq");
   if(pyqTabBtn3) pyqTabBtn3.onclick=()=>{ teacherPanel="pyq"; render(); };
   const libTabBtn3 = document.getElementById("tabLibrary");
@@ -2037,6 +2048,7 @@ function renderTeacherAttendancePanel(t, panelTabs, classKey, isAssociate){
   `;
   document.getElementById("back").onclick=()=>{session=null;teacherPanel="marks";go("home");};
   document.getElementById("tabMarks").onclick=()=>{ teacherPanel="marks"; render(); };
+  document.getElementById("tabStudents").onclick=()=>{ teacherPanel="students"; render(); };
   document.getElementById("tabLeave").onclick=()=>{ teacherPanel="leave"; render(); };
   document.getElementById("tabAccount").onclick=()=>{ teacherPanel="account"; render(); };
   document.getElementById("tabAttendance").onclick=()=>{ teacherPanel="attendance"; render(); };
@@ -2055,6 +2067,36 @@ function renderTeacherAttendancePanel(t, panelTabs, classKey, isAssociate){
       saveDB();
     };
   });
+}
+
+/* ---------------- TEACHER: MY STUDENTS — view-only, report errors to Admin ---------------- */
+function renderTeacherStudentsPanel(t, panelTabs, classKey, isAssociate){
+  const roster = studentsForClass(classKey);
+  const rows = roster.map(s=>`
+    <tr>
+      <td>${s.roll}</td>
+      <td>${s.name}</td>
+      <td>${s.mobile||'<span style="color:var(--red);">Missing</span>'}</td>
+      <td>${s.dob||'<span style="color:var(--red);">Missing</span>'}</td>
+      <td>${s.house||"—"}</td>
+      <td>${s.admno||"—"}</td>
+    </tr>`).join("");
+
+  app.innerHTML = `
+    <button class="back-link" id="back">&larr; Logout</button>
+    <div class="card">
+      ${teacherHeaderHtml(t, t.designation+" · "+(isAssociate?"Associate Class Teacher":"Class Teacher")+": <b>"+classLabel(classKey)+"</b>")}
+      ${panelTabs}
+      <div class="locked-note">This is a <b>view-only</b> list — you cannot edit these details here. If anything looks wrong (a mobile number, date of birth, or spelling), please tell the Principal/Admin so it can be corrected.</div>
+      ${roster.length ? `<div class="scrollbox"><table><tr><th>Roll</th><th>Name</th><th>Mobile</th><th>DOB</th><th>House</th><th>Admission No.</th></tr>${rows}</table></div>` : `<p style="color:var(--muted);font-size:13px;">No students found for ${classLabel(classKey)}.</p>`}
+    </div>
+  `;
+  document.getElementById("back").onclick=()=>{session=null;teacherPanel="marks";go("home");};
+  document.getElementById("tabMarks").onclick=()=>{ teacherPanel="marks"; render(); };
+  document.getElementById("tabStudents").onclick=()=>{ teacherPanel="students"; render(); };
+  document.getElementById("tabLeave").onclick=()=>{ teacherPanel="leave"; render(); };
+  document.getElementById("tabAccount").onclick=()=>{ teacherPanel="account"; render(); };
+  const tabAttBtn = document.getElementById("tabAttendance"); if(tabAttBtn) tabAttBtn.onclick=()=>{ teacherPanel="attendance"; render(); };
 }
 
 /* ---------------- EXAM DEPARTMENT (PYQ) — add/manage, restricted to examDept teacher ---------------- */
