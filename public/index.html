@@ -316,25 +316,76 @@ function cacheLocally(){
 function saveDB(){
   cacheLocally();
   suppressNextSnapshot.main = true;
-  fsdb.collection("appdata").doc("main").set(DB).catch(err=>{
-    console.error("Firestore save failed:", err);
-  });
+  // Fetch-then-merge before writing: if another device saved something (a published
+  // result, a new notice, etc.) that hasn't synced to this tab yet, a blind overwrite
+  // here would silently erase it. Instead, merge dictionary-shaped fields (results,
+  // notices, leaveRequests, etc.) at the record level — this tab's own edits win for
+  // any record it touched, but anything added elsewhere in the meantime is kept.
+  (async ()=>{
+    try{
+      const snap = await fsdb.collection("appdata").doc("main").get();
+      if(snap.exists){
+        const server = snap.data();
+        const merged = {...server};
+        Object.keys(DB).forEach(key=>{
+          const localVal = DB[key], serverVal = server[key];
+          const bothPlainObjects = localVal && typeof localVal==="object" && !Array.isArray(localVal)
+            && serverVal && typeof serverVal==="object" && !Array.isArray(serverVal);
+          merged[key] = bothPlainObjects ? {...serverVal, ...localVal} : localVal;
+        });
+        DB = merged;
+      }
+    }catch(e){
+      console.error("Pre-save merge fetch failed, saving local copy as-is:", e);
+    }
+    fsdb.collection("appdata").doc("main").set(DB).catch(err=>{
+      console.error("Firestore save failed:", err);
+    });
+  })();
   return true;
 }
 function persistStudents(){
   cacheLocally();
   suppressNextSnapshot.students = true;
-  fsdb.collection("appdata").doc("students").set({ list: STUDENTS }).catch(err=>{
-    console.error("Firestore save failed:", err);
-  });
+  (async ()=>{
+    try{
+      const snap = await fsdb.collection("appdata").doc("students").get();
+      if(snap.exists){
+        const serverList = snap.data().list || [];
+        const localRolls = new Set(STUDENTS.map(s=>s.roll));
+        // Keep any server-side student this tab doesn't know about (e.g. added on
+        // another device moments ago); this tab's own copy wins for rolls it has.
+        const onlyOnServer = serverList.filter(s=>!localRolls.has(s.roll));
+        STUDENTS = STUDENTS.concat(onlyOnServer);
+      }
+    }catch(e){
+      console.error("Pre-save merge fetch failed, saving local copy as-is:", e);
+    }
+    fsdb.collection("appdata").doc("students").set({ list: STUDENTS }).catch(err=>{
+      console.error("Firestore save failed:", err);
+    });
+  })();
   return true;
 }
 function persistTeachers(){
   cacheLocally();
   suppressNextSnapshot.teachers = true;
-  fsdb.collection("appdata").doc("teachers").set({ list: TEACHERS }).catch(err=>{
-    console.error("Firestore save failed:", err);
-  });
+  (async ()=>{
+    try{
+      const snap = await fsdb.collection("appdata").doc("teachers").get();
+      if(snap.exists){
+        const serverList = snap.data().list || [];
+        const localIds = new Set(TEACHERS.map(t=>t.id));
+        const onlyOnServer = serverList.filter(t=>!localIds.has(t.id));
+        TEACHERS = TEACHERS.concat(onlyOnServer);
+      }
+    }catch(e){
+      console.error("Pre-save merge fetch failed, saving local copy as-is:", e);
+    }
+    fsdb.collection("appdata").doc("teachers").set({ list: TEACHERS }).catch(err=>{
+      console.error("Firestore save failed:", err);
+    });
+  })();
   return true;
 }
 // Targeted field update — used for class assignments, since many teachers can be
