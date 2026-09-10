@@ -2035,15 +2035,42 @@ function parseCsvLine(line){
   out.push(cur);
   return out;
 }
+function fetchGvizRows(sheetId, tabName){
+  // Google Sheets doesn't send CORS headers on its CSV/JSON export endpoints, so a plain
+  // fetch() gets blocked by the browser even on a fully public sheet. The documented
+  // workaround is to load it as a <script> (JSONP) using the responseHandler param,
+  // since <script> tags aren't subject to the same-origin/CORS restriction.
+  return new Promise((resolve, reject)=>{
+    const cbName = "gvizCb_" + Math.random().toString(36).slice(2);
+    const timer = setTimeout(()=>{
+      cleanup();
+      reject(new Error("Timed out reaching the sheet. Check it's shared as 'Anyone with the link — Viewer'."));
+    }, 12000);
+    function cleanup(){
+      clearTimeout(timer);
+      delete window[cbName];
+      const s = document.getElementById(cbName);
+      if(s) s.remove();
+    }
+    window[cbName] = (response)=>{
+      cleanup();
+      try{
+        if(!response || !response.table){ reject(new Error("Unexpected response from the sheet.")); return; }
+        const rows = response.table.rows.map(r => (r.c||[]).map(cell => (cell && cell.v!=null) ? String(cell.v) : ""));
+        resolve(rows);
+      }catch(e){ reject(e); }
+    };
+    const script = document.createElement("script");
+    script.id = cbName;
+    script.src = `https://docs.google.com/spreadsheets/d/${sheetId}/gviz/tq?tqx=out:json;responseHandler:${cbName}&sheet=${encodeURIComponent(tabName)}`;
+    script.onerror = ()=>{ cleanup(); reject(new Error("Could not load the sheet — check it's shared as 'Anyone with the link — Viewer'.")); };
+    document.head.appendChild(script);
+  });
+}
 async function syncAttendanceFromSheet(classKey){
   const tabName = ATTENDANCE_SHEET_TAB_NAMES[classKey];
   if(!tabName) throw new Error("No master-sheet tab is mapped for this class.");
-  const url = `https://docs.google.com/spreadsheets/d/${ATTENDANCE_SHEET_ID}/gviz/tq?tqx=out:csv&sheet=${encodeURIComponent(tabName)}`;
-  const res = await fetch(url);
-  if(!res.ok) throw new Error("Could not reach the master sheet (it may not be shared as 'Anyone with the link').");
-  const text = await res.text();
-  const lines = text.split(/\r?\n/).filter(l=>l.trim());
-  const rows = lines.map(parseCsvLine);
+  const rows = await fetchGvizRows(ATTENDANCE_SHEET_ID, tabName);
 
   // Find the header row (the one containing "Roll" in some cell) and use its cell
   // positions to figure out which column is which, rather than assuming fixed letters.
@@ -2087,6 +2114,7 @@ async function syncAttendanceFromSheet(classKey){
   saveDB();
   return updated;
 }
+
 
 function renderTeacherAttendancePanel(t, panelTabs, classKey, isAssociate){
   const roster = studentsForClass(classKey);
