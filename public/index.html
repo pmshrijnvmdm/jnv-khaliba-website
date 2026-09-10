@@ -3910,15 +3910,15 @@ function renderAdminSettingsPanel(panelTabs){
 
       <h4 style="color:var(--navy);margin-top:24px;margin-bottom:6px;">Reload Data From This File</h4>
       <p style="font-size:12px;color:var(--muted);margin-bottom:10px;">
-        Use this only when Claude has updated something in the website file itself (e.g. a corrected student record) and it isn't showing up live.
-        <b>Student reload is class-wise</b> — pick the one class that was actually fixed; every other class's live data is left completely untouched, so nobody else's edits get lost.
-        Staff reload still refreshes everyone (there are far fewer staff, and edits there are rarer).
+        Use this only when Claude has updated something in the website file itself (e.g. a corrected photo or record) and it isn't showing up live.
+        <b>Student reload is class-wise</b> — pick the one class that was actually fixed; every other class's live data is left completely untouched.
+        <b>Staff reload is a safe merge</b> — it updates anyone whose ID matches this file and adds anyone new in it, but never deletes or touches staff you've added directly on the site.
       </p>
       <label>Reload Students — pick the class that was fixed</label>
       <select id="reloadClassSel">${classOptions}</select>
       <button class="btn btn-outline" id="reloadStudents" style="margin-top:6px;">🔄 Reload This Class's Student Data</button>
       <div style="margin-top:14px;">
-        <button class="btn btn-outline" id="reloadStaff">🔄 Reload Staff Data from File (all staff)</button>
+        <button class="btn btn-outline" id="reloadStaff">🔄 Reload Staff Data from File (safe merge)</button>
       </div>
       <div class="success" id="reloadOk" style="margin-top:8px;"></div>
     </div>
@@ -3927,10 +3927,21 @@ function renderAdminSettingsPanel(panelTabs){
   wirePrincipalTabs();
 
   document.getElementById("reloadStaff").onclick=()=>{
-    if(!confirm("This will replace the LIVE staff data with what's bundled in this file. Any staff edits made since your last file from Claude will be lost. Continue?")) return;
-    TEACHERS = DATA.TEACHERS;
+    if(!confirm("This will UPDATE any staff whose ID matches what's bundled in this file (e.g. a corrected photo or bio), and ADD any staff from this file who aren't live yet. It will NOT delete or touch any staff you've added directly on the site that aren't in this file. Continue?")) return;
+    const byId = {};
+    TEACHERS.forEach(t=>{ byId[t.id] = t; });
+    let updated = 0, added = 0;
+    DATA.TEACHERS.forEach(bundledT=>{
+      if(byId[bundledT.id]){
+        Object.assign(byId[bundledT.id], bundledT);
+        updated++;
+      } else {
+        TEACHERS.push(bundledT);
+        added++;
+      }
+    });
     if(persistTeachers()){
-      document.getElementById("reloadOk").textContent = "Staff data reloaded from this file — refresh on other devices to see it.";
+      document.getElementById("reloadOk").textContent = `Staff data merged from this file: ${updated} updated, ${added} added. Anyone added directly on the site was left untouched.`;
       setTimeout(render, 800);
     }
   };
