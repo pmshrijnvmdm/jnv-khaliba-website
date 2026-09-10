@@ -1206,7 +1206,7 @@ function renderFacultyPage(){
     ${facultySection("PGT Faculty", pgt)}
     ${facultySection("TGT Faculty", tgt)}
     ${facultySection("Skill Teachers", skill)}
-    ${facultySection("Support Staff", other)}
+    ${facultySection("Non-Teaching Staff", other)}
     ${footerHtml()}
   `;
   wireFooter();
@@ -3525,7 +3525,7 @@ function renderAdminStaffPanel(panelTabs){
         <option value="pgt" ${editing&&editing.facultyCategory==='pgt'?'selected':''}>PGT Faculty</option>
         <option value="tgt" ${editing&&editing.facultyCategory==='tgt'?'selected':''}>TGT Faculty</option>
         <option value="skill" ${editing&&editing.facultyCategory==='skill'?'selected':''}>Skill Teacher</option>
-        <option value="other" ${!editing || !editing.facultyCategory || editing.facultyCategory==='other' ? 'selected':''}>Support Staff</option>
+        <option value="other" ${!editing || !editing.facultyCategory || editing.facultyCategory==='other' ? 'selected':''}>Non-Teaching Staff</option>
       </select>
       <label>Subject</label>
       <input id="stSubject" value="${editing?(editing.subjectFull||editing.subject):""}" placeholder="Subject taught">
