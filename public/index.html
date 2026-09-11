@@ -329,6 +329,12 @@ function cacheLocally(){
   }catch(e){ /* local cache is best-effort only; Firestore is the source of truth */ }
 }
 
+function sanitizeForFirestore(obj){
+  // Firestore rejects any field whose value is literally `undefined` (a bug we hit with
+  // older student/staff records missing a newer field like `photo`). A JSON round-trip
+  // is a simple, reliable way to drop every undefined value before we ever try to save.
+  return JSON.parse(JSON.stringify(obj));
+}
 function saveDB(){
   cacheLocally();
   suppressNextSnapshot.main = true;
@@ -354,16 +360,18 @@ function saveDB(){
     }catch(e){
       console.error("Pre-save merge fetch failed, saving local copy as-is:", e);
     }
-    fsdb.collection("appdata").doc("main").set(DB).catch(err=>{
+    try{
+      await fsdb.collection("appdata").doc("main").set(sanitizeForFirestore(DB));
+    }catch(err){
       console.error("Firestore save failed:", err);
-    });
+    }
   })();
   return true;
 }
 function persistStudents(){
   cacheLocally();
   suppressNextSnapshot.students = true;
-  fsdb.collection("appdata").doc("students").set({ list: STUDENTS }).catch(err=>{
+  fsdb.collection("appdata").doc("students").set(sanitizeForFirestore({ list: STUDENTS })).catch(err=>{
     console.error("Firestore save failed:", err);
   });
   return true;
@@ -371,7 +379,7 @@ function persistStudents(){
 function persistTeachers(){
   cacheLocally();
   suppressNextSnapshot.teachers = true;
-  fsdb.collection("appdata").doc("teachers").set({ list: TEACHERS }).catch(err=>{
+  fsdb.collection("appdata").doc("teachers").set(sanitizeForFirestore({ list: TEACHERS })).catch(err=>{
     console.error("Firestore save failed:", err);
   });
   return true;
@@ -1448,7 +1456,7 @@ function renderHousesPage(){
 
 const GALLERY_CATS = ["Achievements","Events","Sports","Campus","Cultural Events","Science Exhibition","Independence Day","PM SHRI Activities"];
 const HOUSE_NAMES = ["Aravali","Nilgiri","Shiwalik","Udaygiri"];
-const HOUSE_COLORS = { "Aravali":"#1E7A46", "Nilgiri":"#14508F", "Shiwalik":"#a13c3c", "Udaygiri":"#E08A1E" };
+const HOUSE_COLORS = { "Aravali":"#14508F", "Nilgiri":"#1E7A46", "Shiwalik":"#a13c3c", "Udaygiri":"#E08A1E" };
 
 let lightboxImage = null;
 function renderGalleryPage(){
@@ -3576,7 +3584,7 @@ function renderAdminStaffPanel(panelTabs){
       const clash = TEACHERS.find(t=>t.id===loginId && t.id!==staffEditingId);
       if(clash){ errEl.textContent="That Employee ID / Mobile Number is already used by another staff member."; return; }
 
-      let photo = editing ? editing.photo : "";
+      let photo = (editing && editing.photo) ? editing.photo : "";
       if(photoFile){
         try{ photo = await uploadToCloudinary(photoFile, "image"); }
         catch(e){ errEl.textContent="Upload failed: "+e.message; return; }
@@ -3812,7 +3820,7 @@ function renderAdminStudentPanel(panelTabs){
 
       if(!name){ errEl.textContent="Please enter the student's name."; return; }
 
-      let photo = editing ? editing.photo : "";
+      let photo = (editing && editing.photo) ? editing.photo : "";
       if(photoFile){
         try{ photo = await uploadToCloudinary(photoFile, "image"); }
         catch(e){ errEl.textContent="Photo upload failed: "+e.message; return; }
@@ -3900,7 +3908,6 @@ function renderAdminStudentPanel(panelTabs){
 /* ---------------- SITE SETTINGS — Admin only: contact phone & email ---------------- */
 function renderAdminSettingsPanel(panelTabs){
   const actor = currentActor();
-  const classOptions = CLASS_LIST.map(c=>`<option value="${c.key}">${c.label}</option>`).join("");
   app.innerHTML = `
     <button class="back-link" id="back">&larr; Logout</button>
     <div class="card">
@@ -3918,52 +3925,35 @@ function renderAdminSettingsPanel(panelTabs){
       <div class="success" id="scOk"></div>
       <button class="btn btn-primary" id="scSave">Save Contact Details</button>
 
-      <h4 style="color:var(--navy);margin-top:24px;margin-bottom:6px;">Reload Data From This File</h4>
+      <h4 style="color:var(--navy);margin-top:24px;margin-bottom:6px;">Refresh Live Data</h4>
       <p style="font-size:12px;color:var(--muted);margin-bottom:10px;">
-        Use this only when Claude has updated something in the website file itself (e.g. a corrected photo or record) and it isn't showing up live.
-        <b>Student reload is class-wise</b> — pick the one class that was actually fixed; every other class's live data is left completely untouched.
-        <b>Staff reload is a safe merge</b> — it updates anyone whose ID matches this file and adds anyone new in it, but never deletes or touches staff you've added directly on the site.
+        If something looks stale or out of sync, this re-fetches the current live data from the database and redraws the page.
+        It never touches or reverts anyone's edited data — it only re-reads what's already saved.
       </p>
-      <label>Reload Students — pick the class that was fixed</label>
-      <select id="reloadClassSel">${classOptions}</select>
-      <button class="btn btn-outline" id="reloadStudents" style="margin-top:6px;">🔄 Reload This Class's Student Data</button>
-      <div style="margin-top:14px;">
-        <button class="btn btn-outline" id="reloadStaff">🔄 Reload Staff Data from File (safe merge)</button>
-      </div>
+      <button class="btn btn-outline" id="refreshLiveData">🔄 Refresh Data</button>
       <div class="success" id="reloadOk" style="margin-top:8px;"></div>
     </div>
   `;
   document.getElementById("back").onclick=()=>{session=null;go("home");};
   wirePrincipalTabs();
 
-  document.getElementById("reloadStaff").onclick=()=>{
-    if(!confirm("This will UPDATE any staff whose ID matches what's bundled in this file (e.g. a corrected photo or bio), and ADD any staff from this file who aren't live yet. It will NOT delete or touch any staff you've added directly on the site that aren't in this file. Continue?")) return;
-    const byId = {};
-    TEACHERS.forEach(t=>{ byId[t.id] = t; });
-    let updated = 0, added = 0;
-    DATA.TEACHERS.forEach(bundledT=>{
-      if(byId[bundledT.id]){
-        Object.assign(byId[bundledT.id], bundledT);
-        updated++;
-      } else {
-        TEACHERS.push(bundledT);
-        added++;
-      }
-    });
-    if(persistTeachers()){
-      document.getElementById("reloadOk").textContent = `Staff data merged from this file: ${updated} updated, ${added} added. Anyone added directly on the site was left untouched.`;
-      setTimeout(render, 800);
-    }
-  };
-  document.getElementById("reloadStudents").onclick=()=>{
-    const classKey = document.getElementById("reloadClassSel").value;
-    const cls = classKey.split("-")[0], section = classKey.split("-")[1];
-    if(!confirm(`This will replace the LIVE student data for ${classLabel(classKey)} only with what's bundled in this file. Every other class is left untouched. Continue?`)) return;
-    const bundledForClass = DATA.STUDENTS.filter(s=>s.cls===cls && s.section===section);
-    STUDENTS = STUDENTS.filter(s=>!(s.cls===cls && s.section===section)).concat(bundledForClass);
-    if(persistStudents()){
-      document.getElementById("reloadOk").textContent = `${classLabel(classKey)} student data reloaded from this file (${bundledForClass.length} students) — other classes untouched.`;
-      setTimeout(render, 800);
+  document.getElementById("refreshLiveData").onclick=async ()=>{
+    const okEl = document.getElementById("reloadOk");
+    okEl.textContent = "Refreshing...";
+    try{
+      const [mainSnap, stuSnap, teaSnap] = await Promise.all([
+        fsdb.collection("appdata").doc("main").get(),
+        fsdb.collection("appdata").doc("students").get(),
+        fsdb.collection("appdata").doc("teachers").get(),
+      ]);
+      if(mainSnap.exists) DB = Object.assign(defaultDB(), mainSnap.data());
+      if(stuSnap.exists) STUDENTS = stuSnap.data().list || STUDENTS;
+      if(teaSnap.exists) TEACHERS = teaSnap.data().list || TEACHERS;
+      cacheLocally();
+      okEl.textContent = "Data refreshed.";
+      setTimeout(render, 400);
+    }catch(e){
+      okEl.textContent = "Refresh failed: " + e.message;
     }
   };
 
