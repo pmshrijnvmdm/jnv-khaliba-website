@@ -355,45 +355,17 @@ function saveDB(){
 function persistStudents(){
   cacheLocally();
   suppressNextSnapshot.students = true;
-  (async ()=>{
-    try{
-      const snap = await fsdb.collection("appdata").doc("students").get();
-      if(snap.exists){
-        const serverList = snap.data().list || [];
-        const localRolls = new Set(STUDENTS.map(s=>s.roll));
-        // Keep any server-side student this tab doesn't know about (e.g. added on
-        // another device moments ago); this tab's own copy wins for rolls it has.
-        const onlyOnServer = serverList.filter(s=>!localRolls.has(s.roll));
-        STUDENTS = STUDENTS.concat(onlyOnServer);
-      }
-    }catch(e){
-      console.error("Pre-save merge fetch failed, saving local copy as-is:", e);
-    }
-    fsdb.collection("appdata").doc("students").set({ list: STUDENTS }).catch(err=>{
-      console.error("Firestore save failed:", err);
-    });
-  })();
+  fsdb.collection("appdata").doc("students").set({ list: STUDENTS }).catch(err=>{
+    console.error("Firestore save failed:", err);
+  });
   return true;
 }
 function persistTeachers(){
   cacheLocally();
   suppressNextSnapshot.teachers = true;
-  (async ()=>{
-    try{
-      const snap = await fsdb.collection("appdata").doc("teachers").get();
-      if(snap.exists){
-        const serverList = snap.data().list || [];
-        const localIds = new Set(TEACHERS.map(t=>t.id));
-        const onlyOnServer = serverList.filter(t=>!localIds.has(t.id));
-        TEACHERS = TEACHERS.concat(onlyOnServer);
-      }
-    }catch(e){
-      console.error("Pre-save merge fetch failed, saving local copy as-is:", e);
-    }
-    fsdb.collection("appdata").doc("teachers").set({ list: TEACHERS }).catch(err=>{
-      console.error("Firestore save failed:", err);
-    });
-  })();
+  fsdb.collection("appdata").doc("teachers").set({ list: TEACHERS }).catch(err=>{
+    console.error("Firestore save failed:", err);
+  });
   return true;
 }
 // Targeted field update — used for class assignments, since many teachers can be
@@ -3560,6 +3532,9 @@ function renderAdminStaffPanel(panelTabs){
   if(cancelBtn) cancelBtn.onclick=()=>{ staffEditingId=null; render(); };
 
   document.getElementById("stSubmit").onclick=async ()=>{
+    const btn = document.getElementById("stSubmit");
+    if(btn.disabled) return; // guards against a fast double-tap creating two records
+    btn.disabled = true;
     const name = document.getElementById("stName").value.trim();
     const employmentType = document.getElementById("stType").value;
     const designation = document.getElementById("stDesig").value.trim();
@@ -3573,19 +3548,19 @@ function renderAdminStaffPanel(panelTabs){
     const photoFile = document.getElementById("stPhoto").files[0];
     const errEl = document.getElementById("stErr"); errEl.textContent="";
 
-    if(!name){ errEl.textContent="Please enter the staff member's name."; return; }
-    if(employmentType==="Regular" && !empId){ errEl.textContent="Employee ID is required for Regular staff."; return; }
-    if(employmentType==="Contractual" && !mobile){ errEl.textContent="Mobile number is required for Contractual staff (used as their login ID)."; return; }
+    if(!name){ errEl.textContent="Please enter the staff member's name."; btn.disabled=false; return; }
+    if(employmentType==="Regular" && !empId){ errEl.textContent="Employee ID is required for Regular staff."; btn.disabled=false; return; }
+    if(employmentType==="Contractual" && !mobile){ errEl.textContent="Mobile number is required for Contractual staff (used as their login ID)."; btn.disabled=false; return; }
 
     const loginId = employmentType==="Regular" ? empId : mobile;
     // Prevent duplicate login IDs (except when editing the same record)
     const clash = TEACHERS.find(t=>t.id===loginId && t.id!==staffEditingId);
-    if(clash){ errEl.textContent="That Employee ID / Mobile Number is already used by another staff member."; return; }
+    if(clash){ errEl.textContent="That Employee ID / Mobile Number is already used by another staff member."; btn.disabled=false; return; }
 
     let photo = editing ? editing.photo : "";
     if(photoFile){
       try{ photo = await uploadToCloudinary(photoFile, "image"); }
-      catch(e){ errEl.textContent="Upload failed: "+e.message; return; }
+      catch(e){ errEl.textContent="Upload failed: "+e.message; btn.disabled=false; return; }
     }
 
     if(editing){
@@ -3794,6 +3769,9 @@ function renderAdminStudentPanel(panelTabs){
   document.getElementById("stuSearch").oninput=(e)=>{ studentSearchTerm=e.target.value; render(); };
 
   document.getElementById("stuSubmit").onclick=async ()=>{
+    const btn = document.getElementById("stuSubmit");
+    if(btn.disabled) return; // guards against a fast double-tap creating two records
+    btn.disabled = true;
     const classKey = document.getElementById("stuClass").value;
     const cls = classKey.split("-")[0], section = classKey.split("-")[1];
     const name = document.getElementById("stuName").value.trim();
@@ -3806,19 +3784,19 @@ function renderAdminStudentPanel(panelTabs){
     const photoFile = document.getElementById("stuPhoto").files[0];
     const errEl = document.getElementById("stuErr"); errEl.textContent="";
 
-    if(!name){ errEl.textContent="Please enter the student's name."; return; }
+    if(!name){ errEl.textContent="Please enter the student's name."; btn.disabled=false; return; }
 
     let photo = editing ? editing.photo : "";
     if(photoFile){
       try{ photo = await uploadToCloudinary(photoFile, "image"); }
-      catch(e){ errEl.textContent="Photo upload failed: "+e.message; return; }
+      catch(e){ errEl.textContent="Photo upload failed: "+e.message; btn.disabled=false; return; }
     }
 
     if(editing){
-      if(!rollInput){ errEl.textContent="Roll No cannot be empty."; return; }
+      if(!rollInput){ errEl.textContent="Roll No cannot be empty."; btn.disabled=false; return; }
       if(rollInput !== editing.roll && STUDENTS.find(s=>s.roll===rollInput)){
         errEl.textContent = "That Roll No is already used by another student.";
-        return;
+        btn.disabled=false; return;
       }
       editing.roll = rollInput;
       editing.cls = cls; editing.section = section; editing.name = name;
@@ -3829,11 +3807,11 @@ function renderAdminStudentPanel(panelTabs){
       // (e.g. their Roll No changed on another device since this screen was opened).
       // Refuse to silently create a duplicate — make the person re-open Edit instead.
       errEl.textContent = "This student's record could not be found (it may have just changed elsewhere). Please refresh the page and click Edit again.";
-      return;
+      btn.disabled=false; return;
     } else {
       let roll = rollInput;
       if(!roll) roll = nextRollFor(cls, section);
-      if(STUDENTS.find(s=>s.roll===roll)){ errEl.textContent="That Roll No already exists in this class."; return; }
+      if(STUDENTS.find(s=>s.roll===roll)){ errEl.textContent="That Roll No already exists in this class."; btn.disabled=false; return; }
       STUDENTS.push({ roll, name, cls, section, dob, mobile, house, gender, admno, photo, password: nextStudentPassword(name) });
     }
     if(persistStudents()){
