@@ -213,7 +213,12 @@ const PRINCIPAL = DATA.PRINCIPAL;
 const ADMIN = DATA.ADMIN;
 const EXAM_DEPT = DATA.EXAM_DEPT;
 const LIBRARIAN = DATA.LIBRARIAN;
-function currentActor(){ return (session && session.role==="admin") ? ADMIN : PRINCIPAL; }
+function principalDisplay(){
+  // Login id/password always come from the bundled PRINCIPAL; name/designation/photo/bio
+  // can be edited live by Principal or Admin and are stored in DB.principalProfile.
+  return (DB.principalProfile && Object.keys(DB.principalProfile).length) ? {...PRINCIPAL, ...DB.principalProfile} : PRINCIPAL;
+}
+function currentActor(){ return (session && session.role==="admin") ? ADMIN : principalDisplay(); }
 let STUDENTS = DATA.STUDENTS;
 const DEFAULT_HOME_VIDEO = DATA.DEFAULT_HOME_VIDEO || "";
 const SCHOOL_LOGO = DATA.SCHOOL_LOGO || "";
@@ -299,6 +304,7 @@ function defaultDB(){
       "Udaygiri": { srBoysHM:"Sh. Abhishek Singh, PGT (Maths)", srBoysAHM:"Sh. S.K. Suman, (TGT Library)", jrBoysHM:"Mr. Ishtkhar Alam, (TGT Maths)", jrBoysAHM:"Mr. Ankit Tripathi, (TGT Music) / TGT Gujarati", srGirlsHM:"Mrs. Amlawati Lakra, TGT (Science)", srGirlsAHM:"Mrs. Salomi Ekka, PET (F)", jrGirlsHM:"Mrs. Swati Sriwastav, TGT (Eng)", jrGirlsAHM:"Ms. Priyanka Maurya, TGT (Hindi)" }
     },
     homeVideo:null, homeSlides:{}, homeSlideCounter:0,
+    principalProfile: {},
     siteContact:{ phone:"+91 7775-XXXXXX", email:"jnvsarguja@nvsrobpt.in" } };
 }
 let DB = defaultDB();
@@ -1160,15 +1166,18 @@ function renderFacultyPage(){
   const tgt = TEACHERS.filter(t=>staffCategory(t)==="tgt").sort(byExpDesc);
   const skill = TEACHERS.filter(t=>staffCategory(t)==="skill").sort(byExpDesc);
   const other = TEACHERS.filter(t=>staffCategory(t)==="other").sort(byExpDesc);
-  const principalCard = `
+  const principalCard = (()=>{
+    const p = principalDisplay();
+    return `
     <div class="faculty-card faculty-featured">
-      <div class="faculty-photo faculty-photo-lg">${PRINCIPAL.photo?`<img src="${PRINCIPAL.photo}" alt="${PRINCIPAL.name}" loading="lazy">`:`<div class="fac-photo-placeholder">👤</div>`}</div>
+      <div class="faculty-photo faculty-photo-lg">${p.photo?`<img src="${p.photo}" alt="${p.name}" loading="lazy">`:`<div class="fac-photo-placeholder">👤</div>`}</div>
       <div class="faculty-body">
-        <h4 style="font-size:16px;">${PRINCIPAL.name}</h4>
-        <div class="faculty-desig">${PRINCIPAL.designation}</div>
-        <p class="faculty-bio">${PRINCIPAL.bio||""}</p>
+        <h4 style="font-size:16px;">${p.name}</h4>
+        <div class="faculty-desig">${p.designation}</div>
+        <p class="faculty-bio">${p.bio||""}</p>
       </div>
     </div>`;
+  })();
   app.innerHTML = `
     <div class="card">
       <h2 style="color:var(--navy)">Faculty &amp; Staff</h2>
@@ -4019,17 +4028,52 @@ function renderAdminFacilityPhotosPanel(panelTabs){
 /* ---------------- PRINCIPAL / ADMIN — Change / Forgot Password ---------------- */
 function renderPrincipalAccountPanel(panelTabs){
   const actor = currentActor();
+  const pp = principalDisplay();
   app.innerHTML = `
     <button class="back-link" id="back">&larr; Logout</button>
     <div class="card">
       <h2 style="color:var(--navy)">Welcome, ${actor.name}</h2>
       <p style="color:var(--muted);font-size:13px;">${actor.designation}</p>
       ${panelTabs}
+
+      <div class="pwsec">
+        <h4>Principal Profile (shown on the public Faculty page)</h4>
+        <label>Name</label>
+        <input id="ppName" value="${pp.name}">
+        <label>Designation</label>
+        <input id="ppDesig" value="${pp.designation}">
+        <label>Bio</label>
+        <textarea id="ppBio" rows="3">${pp.bio||""}</textarea>
+        <label>Photo</label>
+        <input id="ppPhoto" type="file" accept="image/*">
+        <div class="error" id="ppErr"></div>
+        <div class="success" id="ppOk"></div>
+        <button class="btn btn-outline" id="ppSave">Save Principal Profile</button>
+      </div>
+
       ${changePasswordBlock(session.role, actor.id, actor.password)}
     </div>
   `;
   document.getElementById("back").onclick=()=>{session=null;go("home");};
   wirePrincipalTabs();
+  document.getElementById("ppSave").onclick=async ()=>{
+    const errEl = document.getElementById("ppErr"); errEl.textContent="";
+    const okEl = document.getElementById("ppOk"); okEl.textContent="";
+    const name = document.getElementById("ppName").value.trim();
+    const designation = document.getElementById("ppDesig").value.trim();
+    const bio = document.getElementById("ppBio").value.trim();
+    const photoFile = document.getElementById("ppPhoto").files[0];
+    if(!name){ errEl.textContent="Name cannot be empty."; return; }
+    let photo = pp.photo || "";
+    if(photoFile){
+      try{ photo = await uploadToCloudinary(photoFile, "image"); }
+      catch(e){ errEl.textContent="Photo upload failed: "+e.message; return; }
+    }
+    DB.principalProfile = { name, designation, bio, photo };
+    saveDB();
+    okEl.textContent = "Principal profile updated.";
+    setTimeout(render, 700);
+  };
   wireChangePassword(session.role, actor.id, actor.password);
 }
 
