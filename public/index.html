@@ -547,6 +547,11 @@ function teacherHeaderHtml(t, subtitleHtml){
     </div>
   `;
 }
+function renderSimpleFormatting(text){
+  // escape HTML first so nothing typed can break the page, then allow **bold** only
+  const escaped = (text||"").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+  return escaped.replace(/\*\*(.+?)\*\*/g, "<b>$1</b>");
+}
 function nowStr(){
   return new Date().toLocaleString("en-IN",{day:"2-digit",month:"short",year:"numeric",hour:"2-digit",minute:"2-digit"});
 }
@@ -1251,7 +1256,7 @@ function renderPublicBlogPage(){
     <div class="fac-card fac-plain" style="margin-bottom:10px;">
       <h4 style="color:var(--navy);font-size:14px;">${p.title}</h4>
       <p style="font-size:11px;color:var(--muted);margin:4px 0 8px;">${p.addedOn}</p>
-      <div style="white-space:pre-wrap;font-size:13px;color:#4a4534;line-height:1.5;">${p.content}</div>
+      <div style="white-space:pre-wrap;font-size:13px;color:#4a4534;line-height:1.5;">${renderSimpleFormatting(p.content)}</div>
     </div>
   `).join("");
   app.innerHTML = `
@@ -1274,7 +1279,7 @@ function renderPublicCareerGuidancePage(){
     <div class="fac-card fac-plain" style="margin-bottom:10px;">
       <h4 style="color:var(--navy);font-size:14px;">${p.title}</h4>
       <p style="font-size:11px;color:var(--muted);margin:4px 0 8px;">${p.addedOn}</p>
-      <div style="white-space:pre-wrap;font-size:13px;color:#4a4534;line-height:1.5;">${p.content}</div>
+      <div style="white-space:pre-wrap;font-size:13px;color:#4a4534;line-height:1.5;">${renderSimpleFormatting(p.content)}</div>
     </div>
   `).join("");
   app.innerHTML = `
@@ -2567,7 +2572,8 @@ function renderLibrarianPanel(){
         <label>Title</label>
         <input id="blTitle" placeholder="Blog title">
         <label>Content</label>
-        <textarea id="blContent" rows="7" placeholder="Write your blog post here..."></textarea>
+        <p style="font-size:11.5px;color:var(--muted);margin:-4px 0 6px;">Tip: put <b>**text**</b> around any word/sentence to make it bold (e.g. <code>**important**</code>).</p>
+        <textarea id="blContent" rows="7" placeholder="Write your blog post here... use **word** to bold it"></textarea>
         <div class="error" id="blErr"></div>
         <div class="success" id="blOk"></div>
         <button class="btn btn-primary" id="blSubmit">Publish Blog Post</button>
@@ -2611,7 +2617,8 @@ function renderLibrarianPanel(){
         <label>Title</label>
         <input id="cgTitle" placeholder="e.g. Choosing a stream after Class 10">
         <label>Content</label>
-        <textarea id="cgContent" rows="7" placeholder="Write the guidance content here..."></textarea>
+        <p style="font-size:11.5px;color:var(--muted);margin:-4px 0 6px;">Tip: put <b>**text**</b> around any word/sentence to make it bold.</p>
+        <textarea id="cgContent" rows="7" placeholder="Write the guidance content here... use **word** to bold it"></textarea>
         <div class="error" id="cgErr"></div>
         <div class="success" id="cgOk"></div>
         <button class="btn btn-primary" id="cgSubmit">Publish</button>
@@ -3546,48 +3553,55 @@ function renderAdminStaffPanel(panelTabs){
     const btn = document.getElementById("stSubmit");
     if(btn.disabled) return; // guards against a fast double-tap creating two records
     btn.disabled = true;
-    const name = document.getElementById("stName").value.trim();
-    const employmentType = document.getElementById("stType").value;
-    const designation = document.getElementById("stDesig").value.trim();
-    const facultyCategory = document.getElementById("stCategory").value;
-    const subject = document.getElementById("stSubject").value.trim();
-    const empId = document.getElementById("stEmpId").value.trim();
-    const mobile = document.getElementById("stMobile").value.trim();
-    const qualification = document.getElementById("stQual").value.trim();
-    const experience = document.getElementById("stExp").value.trim();
-    const bio = document.getElementById("stBio").value.trim();
-    const photoFile = document.getElementById("stPhoto").files[0];
     const errEl = document.getElementById("stErr"); errEl.textContent="";
+    try{
+      const name = document.getElementById("stName").value.trim();
+      const employmentType = document.getElementById("stType").value;
+      const designation = document.getElementById("stDesig").value.trim();
+      const facultyCategory = document.getElementById("stCategory").value;
+      const subject = document.getElementById("stSubject").value.trim();
+      const empId = document.getElementById("stEmpId").value.trim();
+      const mobile = document.getElementById("stMobile").value.trim();
+      const qualification = document.getElementById("stQual").value.trim();
+      const experience = document.getElementById("stExp").value.trim();
+      const bio = document.getElementById("stBio").value.trim();
+      const photoFile = document.getElementById("stPhoto").files[0];
 
-    if(!name){ errEl.textContent="Please enter the staff member's name."; btn.disabled=false; return; }
-    if(employmentType==="Regular" && !empId){ errEl.textContent="Employee ID is required for Regular staff."; btn.disabled=false; return; }
-    if(employmentType==="Contractual" && !mobile){ errEl.textContent="Mobile number is required for Contractual staff (used as their login ID)."; btn.disabled=false; return; }
+      if(!name){ errEl.textContent="Please enter the staff member's name."; return; }
+      if(employmentType==="Regular" && !empId){ errEl.textContent="Employee ID is required for Regular staff."; return; }
+      if(employmentType==="Contractual" && !mobile){ errEl.textContent="Mobile number is required for Contractual staff (used as their login ID)."; return; }
 
-    const loginId = employmentType==="Regular" ? empId : mobile;
-    // Prevent duplicate login IDs (except when editing the same record)
-    const clash = TEACHERS.find(t=>t.id===loginId && t.id!==staffEditingId);
-    if(clash){ errEl.textContent="That Employee ID / Mobile Number is already used by another staff member."; btn.disabled=false; return; }
+      const loginId = employmentType==="Regular" ? empId : mobile;
+      // Prevent duplicate login IDs (except when editing the same record)
+      const clash = TEACHERS.find(t=>t.id===loginId && t.id!==staffEditingId);
+      if(clash){ errEl.textContent="That Employee ID / Mobile Number is already used by another staff member."; return; }
 
-    let photo = editing ? editing.photo : "";
-    if(photoFile){
-      try{ photo = await uploadToCloudinary(photoFile, "image"); }
-      catch(e){ errEl.textContent="Upload failed: "+e.message; btn.disabled=false; return; }
+      let photo = editing ? editing.photo : "";
+      if(photoFile){
+        try{ photo = await uploadToCloudinary(photoFile, "image"); }
+        catch(e){ errEl.textContent="Upload failed: "+e.message; return; }
+      }
+
+      if(editing){
+        Object.assign(editing, { name, employmentType, designation, facultyCategory, subject, subjectFull:subject, id:loginId, mobile, qualification, experience, bio, photo });
+        staffEditingId = null;
+      } else {
+        TEACHERS.push({
+          name, employmentType, designation, facultyCategory, subject, subjectFull: subject, id: loginId, mobile,
+          qualification, experience, bio, photo, password: nextTeacherPassword(name),
+          examDept:false, librarian:false
+        });
+      }
+      if(persistTeachers()){
+        document.getElementById("stOk").textContent = editing ? "Changes saved." : "Staff member added.";
+        setTimeout(render, 600);
+        return; // leave button disabled; the imminent re-render replaces it anyway
+      }
+    }catch(e){
+      console.error("Save staff failed:", e);
+      errEl.textContent = "Something went wrong while saving: " + e.message + ". Please try again.";
     }
-
-    if(editing){
-      Object.assign(editing, { name, employmentType, designation, facultyCategory, subject, subjectFull:subject, id:loginId, mobile, qualification, experience, bio, photo });
-      staffEditingId = null;
-    } else {
-      TEACHERS.push({
-        name, employmentType, designation, facultyCategory, subject, subjectFull: subject, id: loginId, mobile,
-        qualification, experience, bio, photo, password: nextTeacherPassword(name),
-        examDept:false, librarian:false
-      });
-    }
-    if(persistTeachers()){
-      document.getElementById("stOk").textContent = editing ? "Changes saved." : "Staff member added.";
-      setTimeout(render, 600);
-    }
+    btn.disabled = false;
   };
 
   document.querySelectorAll("[data-editstaff]").forEach(btn=>{
@@ -3783,52 +3797,59 @@ function renderAdminStudentPanel(panelTabs){
     const btn = document.getElementById("stuSubmit");
     if(btn.disabled) return; // guards against a fast double-tap creating two records
     btn.disabled = true;
-    const classKey = document.getElementById("stuClass").value;
-    const cls = classKey.split("-")[0], section = classKey.split("-")[1];
-    const name = document.getElementById("stuName").value.trim();
-    const mobile = document.getElementById("stuMobile").value.trim();
-    const dob = document.getElementById("stuDob").value;
-    const house = document.getElementById("stuHouse").value.trim();
-    const gender = document.getElementById("stuGender").value;
-    const admno = document.getElementById("stuAdmno").value.trim();
-    const rollInput = document.getElementById("stuRoll").value.trim();
-    const photoFile = document.getElementById("stuPhoto").files[0];
     const errEl = document.getElementById("stuErr"); errEl.textContent="";
+    try{
+      const classKey = document.getElementById("stuClass").value;
+      const cls = classKey.split("-")[0], section = classKey.split("-")[1];
+      const name = document.getElementById("stuName").value.trim();
+      const mobile = document.getElementById("stuMobile").value.trim();
+      const dob = document.getElementById("stuDob").value;
+      const house = document.getElementById("stuHouse").value.trim();
+      const gender = document.getElementById("stuGender").value;
+      const admno = document.getElementById("stuAdmno").value.trim();
+      const rollInput = document.getElementById("stuRoll").value.trim();
+      const photoFile = document.getElementById("stuPhoto").files[0];
 
-    if(!name){ errEl.textContent="Please enter the student's name."; btn.disabled=false; return; }
+      if(!name){ errEl.textContent="Please enter the student's name."; return; }
 
-    let photo = editing ? editing.photo : "";
-    if(photoFile){
-      try{ photo = await uploadToCloudinary(photoFile, "image"); }
-      catch(e){ errEl.textContent="Photo upload failed: "+e.message; btn.disabled=false; return; }
-    }
-
-    if(editing){
-      if(!rollInput){ errEl.textContent="Roll No cannot be empty."; btn.disabled=false; return; }
-      if(rollInput !== editing.roll && STUDENTS.find(s=>s.roll===rollInput)){
-        errEl.textContent = "That Roll No is already used by another student.";
-        btn.disabled=false; return;
+      let photo = editing ? editing.photo : "";
+      if(photoFile){
+        try{ photo = await uploadToCloudinary(photoFile, "image"); }
+        catch(e){ errEl.textContent="Photo upload failed: "+e.message; return; }
       }
-      editing.roll = rollInput;
-      editing.cls = cls; editing.section = section; editing.name = name;
-      editing.mobile = mobile; editing.dob = dob; editing.house = house; editing.gender = gender; editing.admno = admno; editing.photo = photo;
-      studentEditingRoll = null;
-    } else if(studentEditingRoll){
-      // We were trying to edit someone, but their record could not be found anymore
-      // (e.g. their Roll No changed on another device since this screen was opened).
-      // Refuse to silently create a duplicate — make the person re-open Edit instead.
-      errEl.textContent = "This student's record could not be found (it may have just changed elsewhere). Please refresh the page and click Edit again.";
-      btn.disabled=false; return;
-    } else {
-      let roll = rollInput;
-      if(!roll) roll = nextRollFor(cls, section);
-      if(STUDENTS.find(s=>s.roll===roll)){ errEl.textContent="That Roll No already exists in this class."; btn.disabled=false; return; }
-      STUDENTS.push({ roll, name, cls, section, dob, mobile, house, gender, admno, photo, password: nextStudentPassword(name) });
+
+      if(editing){
+        if(!rollInput){ errEl.textContent="Roll No cannot be empty."; return; }
+        if(rollInput !== editing.roll && STUDENTS.find(s=>s.roll===rollInput)){
+          errEl.textContent = "That Roll No is already used by another student.";
+          return;
+        }
+        editing.roll = rollInput;
+        editing.cls = cls; editing.section = section; editing.name = name;
+        editing.mobile = mobile; editing.dob = dob; editing.house = house; editing.gender = gender; editing.admno = admno; editing.photo = photo;
+        studentEditingRoll = null;
+      } else if(studentEditingRoll){
+        // We were trying to edit someone, but their record could not be found anymore
+        // (e.g. their Roll No changed on another device since this screen was opened).
+        // Refuse to silently create a duplicate — make the person re-open Edit instead.
+        errEl.textContent = "This student's record could not be found (it may have just changed elsewhere). Please refresh the page and click Edit again.";
+        return;
+      } else {
+        let roll = rollInput;
+        if(!roll) roll = nextRollFor(cls, section);
+        if(STUDENTS.find(s=>s.roll===roll)){ errEl.textContent="That Roll No already exists in this class."; return; }
+        STUDENTS.push({ roll, name, cls, section, dob, mobile, house, gender, admno, photo, password: nextStudentPassword(name) });
+      }
+      if(persistStudents()){
+        document.getElementById("stuOk").textContent = editing ? "Changes saved." : "Student added.";
+        setTimeout(render, 600);
+        return; // leave button disabled; the imminent re-render replaces it anyway
+      }
+    }catch(e){
+      console.error("Save student failed:", e);
+      errEl.textContent = "Something went wrong while saving: " + e.message + ". Please try again.";
     }
-    if(persistStudents()){
-      document.getElementById("stuOk").textContent = editing ? "Changes saved." : "Student added.";
-      setTimeout(render, 600);
-    }
+    btn.disabled = false;
   };
 
   document.getElementById("stuBulkBtn").onclick=()=>{
