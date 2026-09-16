@@ -306,6 +306,8 @@ function defaultDB(){
     homeVideo:null, homeSlides:{}, homeSlideCounter:0,
     principalProfile: {},
     subjectsByClass: {},
+    classEditRequests: {},
+    socialLinks: {},
     contactMessages: {}, contactMessageCounter: 0,
     siteContact:{ phone:"+91 7775-XXXXXX", email:"jnvsarguja@nvsrobpt.in" } };
 }
@@ -338,6 +340,16 @@ function sanitizeForFirestore(obj){
   return JSON.parse(JSON.stringify(obj));
 }
 let saveDBChain = Promise.resolve();
+let pendingDeletions = [];
+function deleteFromDB(topKey, subKey){
+  // Use this instead of `delete DB.xxx[key]` directly. The safety-merge in saveDB()
+  // re-fetches the server copy before writing (to protect concurrent edits elsewhere),
+  // but a plain object-spread merge can't tell "removed" apart from "never touched" —
+  // so a deletion could otherwise get silently resurrected from that stale fetch.
+  // Recording it here means saveDB() re-applies the deletion after merging.
+  if(DB[topKey]) delete DB[topKey][subKey];
+  pendingDeletions.push({topKey, subKey});
+}
 function saveDB(){
   cacheLocally();
   suppressNextSnapshot.main = true;
@@ -352,6 +364,8 @@ function saveDB(){
   // the result of the one before it — otherwise an earlier save that's slower to
   // reach the server can finish last and silently stomp a more recent change.
   const pendingDB = DB; // snapshot of what THIS call should end up persisting
+  const myDeletions = pendingDeletions;
+  pendingDeletions = [];
   saveDBChain = saveDBChain.then(async ()=>{
     try{
       const snap = await fsdb.collection("appdata").doc("main").get();
@@ -364,6 +378,9 @@ function saveDB(){
             && serverVal && typeof serverVal==="object" && !Array.isArray(serverVal);
           merged[key] = bothPlainObjects ? {...serverVal, ...localVal} : localVal;
         });
+        // Re-apply any deletions this call made — a union-merge alone would otherwise
+        // resurrect them from the server's (older, pre-deletion) copy.
+        myDeletions.forEach(({topKey,subKey})=>{ if(merged[topKey]) delete merged[topKey][subKey]; });
         DB = merged;
       }
     }catch(e){
@@ -398,7 +415,7 @@ function persistTeachers(){
 // accidentally overwriting another teacher's assignment made moments earlier.
 function saveTeacherAssignment(teacherId, classKeyOrNull){
   if(!DB.teacherAssignments) DB.teacherAssignments = {};
-  if(classKeyOrNull===null || classKeyOrNull===undefined){ delete DB.teacherAssignments[teacherId]; }
+  if(classKeyOrNull===null || classKeyOrNull===undefined){ deleteFromDB("teacherAssignments", teacherId); }
   else { DB.teacherAssignments[teacherId] = classKeyOrNull; }
   cacheLocally();
   suppressNextSnapshot.main = true;
@@ -415,7 +432,7 @@ function saveTeacherAssignment(teacherId, classKeyOrNull){
 // (e.g. when the main Class Teacher is absent). Both see and can edit the same result sheet.
 function saveAssociateAssignment(teacherId, classKeyOrNull){
   if(!DB.associateAssignments) DB.associateAssignments = {};
-  if(classKeyOrNull===null || classKeyOrNull===undefined){ delete DB.associateAssignments[teacherId]; }
+  if(classKeyOrNull===null || classKeyOrNull===undefined){ deleteFromDB("associateAssignments", teacherId); }
   else { DB.associateAssignments[teacherId] = classKeyOrNull; }
   cacheLocally();
   suppressNextSnapshot.main = true;
@@ -949,6 +966,13 @@ function footerHtml(){
           <p>✉️ ${DB.siteContact.email}</p>
           <button id="fStudentLogin">Student Login</button>
           <button id="fInstituteLogin">Institute Login</button>
+          ${(() => {
+            const active = SOCIAL_PLATFORMS.filter(p => DB.socialLinks && DB.socialLinks[p.key]);
+            return active.length ? `
+              <div style="margin-top:12px;display:flex;gap:10px;">
+                ${active.map(p=>`<a href="${DB.socialLinks[p.key]}" target="_blank" rel="noopener" title="${p.label}" style="font-size:20px;text-decoration:none;">${p.icon}</a>`).join("")}
+              </div>` : "";
+          })()}
         </div>
       </div>
       <div style="text-align:center;padding-top:14px;margin-top:14px;border-top:1px solid rgba(255,255,255,0.12);font-size:10.5px;opacity:0.6;">
@@ -1516,6 +1540,14 @@ function renderHousesPage(){
 
 const GALLERY_CATS = ["Achievements","Events","Sports","Campus","Cultural Events","Science Exhibition","Independence Day","PM SHRI Activities"];
 const HOUSE_NAMES = ["Aravali","Nilgiri","Shiwalik","Udaygiri"];
+const SOCIAL_PLATFORMS = [
+  { key:"instagram", label:"Instagram", icon:"📷" },
+  { key:"facebook", label:"Facebook", icon:"📘" },
+  { key:"youtube", label:"YouTube", icon:"▶️" },
+  { key:"twitter", label:"Twitter / X", icon:"🐦" },
+  { key:"telegram", label:"Telegram", icon:"✈️" },
+  { key:"whatsapp", label:"WhatsApp", icon:"💬" },
+];
 const HOUSE_COLORS = { "Aravali":"#14508F", "Nilgiri":"#1E7A46", "Shiwalik":"#a13c3c", "Udaygiri":"#E08A1E" };
 
 let lightboxImage = null;
@@ -2519,23 +2551,61 @@ function renderTeacherAttendancePanel(t, panelTabs, classKey, isAssociate){
 /* ---------------- TEACHER: MY STUDENTS — view-only, report errors to Admin ---------------- */
 function renderTeacherStudentsPanel(t, panelTabs, classKey, isAssociate){
   const roster = studentsForClass(classKey);
-  const rows = roster.map(s=>`
-    <tr>
-      <td>${s.roll}</td>
-      <td>${s.name}</td>
-      <td>${s.mobile||'<span style="color:var(--red);">Missing</span>'}</td>
-      <td>${s.dob||'<span style="color:var(--red);">Missing</span>'}</td>
-      <td>${s.house||"—"}</td>
-      <td>${s.admno||"—"}</td>
-    </tr>`).join("");
+  const editReq = (DB.classEditRequests && DB.classEditRequests[classKey]) || { status: "none" };
+  const unlocked = editReq.status === "unlocked";
+  const requested = editReq.status === "requested";
+
+  let bodyHtml;
+  if(unlocked){
+    const rows = roster.map(s=>`
+      <tr>
+        <td>${s.roll}</td>
+        <td><input class="editstu-field" data-roll="${s.roll}" data-field="name" value="${s.name}" style="width:130px;"></td>
+        <td><input class="editstu-field" data-roll="${s.roll}" data-field="mobile" value="${s.mobile||""}" style="width:110px;"></td>
+        <td><input class="editstu-field" data-roll="${s.roll}" data-field="dob" type="date" value="${s.dob||""}" style="width:130px;"></td>
+        <td><select class="editstu-field" data-roll="${s.roll}" data-field="house">
+              <option value="" ${!s.house?"selected":""}>—</option>
+              ${HOUSE_NAMES.map(h=>`<option value="${h}" ${s.house===h?"selected":""}>${h}</option>`).join("")}
+            </select></td>
+        <td><select class="editstu-field" data-roll="${s.roll}" data-field="gender">
+              <option value="" ${!s.gender?"selected":""}>—</option>
+              <option value="M" ${s.gender==='M'?"selected":""}>Boy</option>
+              <option value="F" ${s.gender==='F'?"selected":""}>Girl</option>
+            </select></td>
+      </tr>`).join("");
+    bodyHtml = `
+      <div class="success">✅ Admin has unlocked editing for ${classLabel(classKey)}. Make your changes below, then click Submit — this locks again right after, so ask Admin again next time you need to fix something.</div>
+      ${roster.length ? `<div class="scrollbox" style="margin-top:10px;"><table><tr><th>Roll</th><th>Name</th><th>Mobile</th><th>DOB</th><th>House</th><th>Gender</th></tr>${rows}</table></div>` : `<p style="color:var(--muted);font-size:13px;">No students found for ${classLabel(classKey)}.</p>`}
+      <div class="error" id="editStuErr" style="margin-top:8px;"></div>
+      <button class="btn btn-primary" id="submitStuEdits" style="margin-top:10px;">Submit Changes</button>
+    `;
+  } else {
+    const rows = roster.map(s=>`
+      <tr>
+        <td>${s.roll}</td>
+        <td>${s.name}</td>
+        <td>${s.mobile||'<span style="color:var(--red);">Missing</span>'}</td>
+        <td>${s.dob||'<span style="color:var(--red);">Missing</span>'}</td>
+        <td>${s.house||"—"}</td>
+        <td>${s.admno||"—"}</td>
+      </tr>`).join("");
+    bodyHtml = `
+      <div class="locked-note">
+        This is a <b>view-only</b> list. If a mobile number, DOB, house, or spelling needs fixing,
+        ${requested ? `you've already asked — <b>waiting for Admin to unlock editing</b> for ${classLabel(classKey)}.` :
+          `click below to ask Admin for permission to edit ${classLabel(classKey)}'s students directly.`}
+      </div>
+      ${!requested ? `<button class="btn btn-outline" id="requestEditBtn" style="margin-top:10px;">Request Edit Permission for ${classLabel(classKey)}</button>` : ""}
+      ${roster.length ? `<div class="scrollbox" style="margin-top:14px;"><table><tr><th>Roll</th><th>Name</th><th>Mobile</th><th>DOB</th><th>House</th><th>Admission No.</th></tr>${rows}</table></div>` : `<p style="color:var(--muted);font-size:13px;">No students found for ${classLabel(classKey)}.</p>`}
+    `;
+  }
 
   app.innerHTML = `
     <button class="back-link" id="back">&larr; Logout</button>
     <div class="card">
       ${teacherHeaderHtml(t, t.designation+" · "+(isAssociate?"Associate Class Teacher":"Class Teacher")+": <b>"+classLabel(classKey)+"</b>")}
       ${panelTabs}
-      <div class="locked-note">This is a <b>view-only</b> list — you cannot edit these details here. If anything looks wrong (a mobile number, date of birth, or spelling), please tell the Principal/Admin so it can be corrected.</div>
-      ${roster.length ? `<div class="scrollbox"><table><tr><th>Roll</th><th>Name</th><th>Mobile</th><th>DOB</th><th>House</th><th>Admission No.</th></tr>${rows}</table></div>` : `<p style="color:var(--muted);font-size:13px;">No students found for ${classLabel(classKey)}.</p>`}
+      ${bodyHtml}
     </div>
   `;
   document.getElementById("back").onclick=()=>{session=null;teacherPanel="marks";go("home");};
@@ -2545,6 +2615,39 @@ function renderTeacherStudentsPanel(t, panelTabs, classKey, isAssociate){
   document.getElementById("tabLeave").onclick=()=>{ teacherPanel="leave"; render(); };
   document.getElementById("tabAccount").onclick=()=>{ teacherPanel="account"; render(); };
   const tabAttBtn = document.getElementById("tabAttendance"); if(tabAttBtn) tabAttBtn.onclick=()=>{ teacherPanel="attendance"; render(); };
+
+  const reqBtn = document.getElementById("requestEditBtn");
+  if(reqBtn) reqBtn.onclick=()=>{
+    if(!DB.classEditRequests) DB.classEditRequests = {};
+    DB.classEditRequests[classKey] = { status:"requested", requestedBy: t.name, requestedOn: nowStr() };
+    saveDB();
+    render();
+  };
+
+  const submitBtn = document.getElementById("submitStuEdits");
+  if(submitBtn) submitBtn.onclick=()=>{
+    const errEl = document.getElementById("editStuErr"); errEl.textContent="";
+    const byRoll = {};
+    document.querySelectorAll(".editstu-field").forEach(el=>{
+      const roll = el.dataset.roll, field = el.dataset.field;
+      if(!byRoll[roll]) byRoll[roll] = {};
+      byRoll[roll][field] = el.value.trim();
+    });
+    for(const roll in byRoll){
+      if(!byRoll[roll].name){ errEl.textContent = "Name cannot be empty (Roll "+roll+")."; return; }
+    }
+    roster.forEach(s=>{
+      const edits = byRoll[s.roll];
+      if(!edits) return;
+      s.name = edits.name; s.mobile = edits.mobile; s.dob = edits.dob;
+      s.house = edits.house; s.gender = edits.gender;
+    });
+    DB.classEditRequests[classKey] = { status:"none" };
+    if(persistStudents()){
+      saveDB();
+      render();
+    }
+  };
 }
 
 /* ---------------- EXAM DEPARTMENT (PYQ) — add/manage, restricted to examDept teacher ---------------- */
@@ -2736,7 +2839,7 @@ function renderExamDeptPanel(){
   document.querySelectorAll("[data-del]").forEach(btn=>{
     btn.onclick=()=>{
       const id = btn.dataset.del;
-      delete DB.pyqs[id];
+      deleteFromDB("pyqs", id);
       saveDB(); render();
     };
   });
@@ -2820,7 +2923,7 @@ function renderLibrarianPanel(){
       setTimeout(render, 600);
     };
     document.querySelectorAll("[data-delblog]").forEach(btn=>{
-      btn.onclick=()=>{ delete DB.blogs[btn.dataset.delblog]; saveDB(); render(); };
+      btn.onclick=()=>{ deleteFromDB("blogs", btn.dataset.delblog); saveDB(); render(); };
     });
     return;
   }
@@ -2865,7 +2968,7 @@ function renderLibrarianPanel(){
       setTimeout(render, 600);
     };
     document.querySelectorAll("[data-delguide]").forEach(btn=>{
-      btn.onclick=()=>{ delete DB.careerGuides[btn.dataset.delguide]; saveDB(); render(); };
+      btn.onclick=()=>{ deleteFromDB("careerGuides", btn.dataset.delguide); saveDB(); render(); };
     });
     return;
   }
@@ -2932,7 +3035,7 @@ function renderLibrarianPanel(){
     }
   };
   document.querySelectorAll("[data-delbook]").forEach(btn=>{
-    btn.onclick=()=>{ delete DB.books[btn.dataset.delbook]; saveDB(); render(); };
+    btn.onclick=()=>{ deleteFromDB("books", btn.dataset.delbook); saveDB(); render(); };
   });
 }
 
@@ -3441,7 +3544,7 @@ function renderPrincipalNoticesPanel(panelTabs){
     }
   };
   document.querySelectorAll("[data-delnotice]").forEach(btn=>{
-    btn.onclick=()=>{ delete DB.notices[btn.dataset.delnotice]; saveDB(); render(); };
+    btn.onclick=()=>{ deleteFromDB("notices", btn.dataset.delnotice); saveDB(); render(); };
   });
 }
 
@@ -3544,7 +3647,7 @@ function renderPrincipalGalleryPanel(panelTabs){
     }
   };
   document.querySelectorAll("[data-delslide]").forEach(btn=>{
-    btn.onclick=()=>{ delete DB.homeSlides[btn.dataset.delslide]; saveDB(); render(); };
+    btn.onclick=()=>{ deleteFromDB("homeSlides", btn.dataset.delslide); saveDB(); render(); };
   });
 
   document.getElementById("phSubmit").onclick=async ()=>{
@@ -3565,7 +3668,7 @@ function renderPrincipalGalleryPanel(panelTabs){
     }
   };
   document.querySelectorAll("[data-delphoto]").forEach(btn=>{
-    btn.onclick=()=>{ delete DB.galleryPhotos[btn.dataset.delphoto]; saveDB(); render(); };
+    btn.onclick=()=>{ deleteFromDB("galleryPhotos", btn.dataset.delphoto); saveDB(); render(); };
   });
 }
 
@@ -3630,7 +3733,7 @@ function renderPrincipalCareersPanel(panelTabs){
     };
   });
   document.querySelectorAll("[data-delcareer]").forEach(btn=>{
-    btn.onclick=()=>{ delete DB.careers[btn.dataset.delcareer]; saveDB(); render(); };
+    btn.onclick=()=>{ deleteFromDB("careers", btn.dataset.delcareer); saveDB(); render(); };
   });
 }
 
@@ -3667,7 +3770,7 @@ function renderPrincipalMessagesPanel(panelTabs){
   Object.values(DB.contactMessages).forEach(m=>{ if(!m.read){ m.read = true; anyUnread = true; } });
   if(anyUnread) saveDB();
   document.querySelectorAll("[data-delmsg]").forEach(btn=>{
-    btn.onclick=()=>{ delete DB.contactMessages[btn.dataset.delmsg]; saveDB(); render(); };
+    btn.onclick=()=>{ deleteFromDB("contactMessages", btn.dataset.delmsg); saveDB(); render(); };
   });
 }
 
@@ -3989,6 +4092,21 @@ function renderAdminStudentPanel(panelTabs){
       </td>
     </tr>`).join("");
 
+  const pendingRequests = Object.entries(DB.classEditRequests||{}).filter(([k,v])=>v.status==="requested");
+  const editReqHtml = pendingRequests.length ? `
+    <div class="locked-note" style="border-color:var(--navy);background:#eef3fb;">
+      <b>📋 Class Teachers waiting for edit permission</b>
+      <ul style="margin:6px 0 0 18px;padding:0;">
+        ${pendingRequests.map(([ck,v])=>`<li>${classLabel(ck)} — requested by <b>${v.requestedBy}</b> (${v.requestedOn}) <button class="btn btn-outline btn-sm" data-unlockclass="${ck}" style="margin-left:8px;padding:2px 8px;font-size:11px;">Unlock for Editing</button></li>`).join("")}
+      </ul>
+    </div>` : "";
+  const unlockedClasses = Object.entries(DB.classEditRequests||{}).filter(([k,v])=>v.status==="unlocked");
+  const unlockedHtml = unlockedClasses.length ? `
+    <div class="locked-note">
+      <b>🔓 Currently unlocked for the Class Teacher to edit directly:</b>
+      ${unlockedClasses.map(([ck])=>`${classLabel(ck)} <button class="btn btn-outline btn-sm" data-relockclass="${ck}" style="margin-left:6px;padding:2px 8px;font-size:11px;">Re-lock</button>`).join(", ")}
+    </div>` : "";
+
   app.innerHTML = `
     <button class="back-link" id="back">&larr; Logout</button>
     <div class="card">
@@ -3996,6 +4114,8 @@ function renderAdminStudentPanel(panelTabs){
       <p style="color:var(--muted);font-size:13px;">${actor.designation}</p>
       ${panelTabs}
 
+      ${editReqHtml}
+      ${unlockedHtml}
       ${dupeWarning}
       <h4 style="color:var(--navy);margin-bottom:6px;">${editing ? "Edit Student" : "Add New Student"}</h4>
       <label>Class</label>
@@ -4166,6 +4286,22 @@ function renderAdminStudentPanel(panelTabs){
       render();
     };
   });
+  document.querySelectorAll("[data-unlockclass]").forEach(btn=>{
+    btn.onclick=()=>{
+      const ck = btn.dataset.unlockclass;
+      DB.classEditRequests[ck] = { status:"unlocked", unlockedBy: actor.name, unlockedOn: nowStr() };
+      saveDB();
+      render();
+    };
+  });
+  document.querySelectorAll("[data-relockclass]").forEach(btn=>{
+    btn.onclick=()=>{
+      const ck = btn.dataset.relockclass;
+      DB.classEditRequests[ck] = { status:"none" };
+      saveDB();
+      render();
+    };
+  });
 }
 
 /* ---------------- SITE SETTINGS — Admin only: contact phone & email ---------------- */
@@ -4188,6 +4324,18 @@ function renderAdminSettingsPanel(panelTabs){
       <div class="success" id="scOk"></div>
       <button class="btn btn-primary" id="scSave">Save Contact Details</button>
 
+      <h4 style="color:var(--navy);margin-top:24px;margin-bottom:6px;">Social Media Links</h4>
+      <p style="font-size:12px;color:var(--muted);margin-bottom:10px;">
+        Fill in a link and its icon appears in the site footer, linking straight to that app/page. Leave it blank to hide that icon — only platforms with a link show up.
+      </p>
+      ${SOCIAL_PLATFORMS.map(p=>`
+        <label>${p.icon} ${p.label}</label>
+        <input class="social-link-input" data-platform="${p.key}" value="${(DB.socialLinks&&DB.socialLinks[p.key])||""}" placeholder="Paste the ${p.label} link here">
+      `).join("")}
+      <div class="error" id="socialErr"></div>
+      <div class="success" id="socialOk"></div>
+      <button class="btn btn-primary" id="socialSave">Save Social Links</button>
+
       <h4 style="color:var(--navy);margin-top:24px;margin-bottom:6px;">Refresh Live Data</h4>
       <p style="font-size:12px;color:var(--muted);margin-bottom:10px;">
         If something looks stale or out of sync, this re-fetches the current live data from the database and redraws the page.
@@ -4199,6 +4347,19 @@ function renderAdminSettingsPanel(panelTabs){
   `;
   document.getElementById("back").onclick=()=>{session=null;go("home");};
   wirePrincipalTabs();
+
+  document.getElementById("socialSave").onclick=()=>{
+    const errEl = document.getElementById("socialErr"); errEl.textContent="";
+    if(!DB.socialLinks) DB.socialLinks = {};
+    document.querySelectorAll(".social-link-input").forEach(inp=>{
+      const val = inp.value.trim();
+      if(val){ DB.socialLinks[inp.dataset.platform] = val; }
+      else { deleteFromDB("socialLinks", inp.dataset.platform); }
+    });
+    saveDB();
+    document.getElementById("socialOk").textContent = "Social links saved — check the site footer.";
+    setTimeout(render, 700);
+  };
 
   document.getElementById("refreshLiveData").onclick=async ()=>{
     const okEl = document.getElementById("reloadOk");
@@ -4405,7 +4566,7 @@ function renderAdminSubjectsPanel(panelTabs){
   const resetBtn = document.getElementById("resetSubjBtn");
   if(resetBtn) resetBtn.onclick=()=>{
     if(!confirm("Reset Class "+adminSubjectsSelectedClass+" back to the default subject list?")) return;
-    delete DB.subjectsByClass[adminSubjectsSelectedClass];
+    deleteFromDB("subjectsByClass", adminSubjectsSelectedClass);
     saveDB();
     render();
   };
