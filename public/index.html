@@ -305,6 +305,7 @@ function defaultDB(){
     },
     homeVideo:null, homeSlides:{}, homeSlideCounter:0,
     principalProfile: {},
+    subjectsByClass: {},
     contactMessages: {}, contactMessageCounter: 0,
     siteContact:{ phone:"+91 7775-XXXXXX", email:"jnvsarguja@nvsrobpt.in" } };
 }
@@ -651,7 +652,10 @@ function subjectGroupLabel(key){
   const map = {"6":"Class 6","7":"Class 7","8":"Class 8","9":"Class 9","10":"Class 10","11":"Class 11","12":"Class 12"};
   return map[key] || key;
 }
-function subjectsForClass(classKey){ return SUBJECTS_BY_CLASS[classKey] || SUBJECTS_BY_CLASS[classNumber(classKey)] || []; }
+function subjectsForClass(classKey){
+  const num = classNumber(classKey);
+  return (DB.subjectsByClass && DB.subjectsByClass[num]) || SUBJECTS_BY_CLASS[classKey] || SUBJECTS_BY_CLASS[num] || [];
+}
 // Try to find the official time-table subject label matching a teacher's subject, for a given class.
 function matchTimetableSubject(teacherSubject, classKey){
   const list = subjectsForClass(classKey);
@@ -704,6 +708,47 @@ function studentOverall(r, roll){
     if(v!==""&&v!=null){ scored += Number(v); max += Number(s.maxMarks||100); }
   });
   return max>0 ? {scored, max, pct: (scored/max*100)} : null;
+}
+// Class rank (Excel-RANK style: ties share a rank, next rank skips ahead) and CBSE-style
+// relative grade (A1/A2/B1/B2/C1/C2/D1/D2 = successive 1/8ths of PASSED students by total
+// marks; anyone below 33% overall gets E), computed together for one class+exam sheet.
+function classRanksAndGrades(classKey, r){
+  const roster = studentsForClass(classKey);
+  const withMarks = roster
+    .map(s=>({roll:s.roll, overall: studentOverall(r, s.roll)}))
+    .filter(x=>x.overall);
+
+  const result = {}; // roll -> {rank, relGrade}
+
+  // Rank: Excel RANK(percent, range, 0) — ranked by Percentage (not raw total), so a student
+  // with a missing/absent subject (lower max) is still compared fairly. Ties share a rank,
+  // and the next rank skips ahead by however many tied (matches Excel's RANK behaviour).
+  const byPct = [...withMarks].sort((a,b)=> b.overall.pct - a.overall.pct);
+  byPct.forEach((x,i)=>{
+    const rank = (i>0 && x.overall.pct===byPct[i-1].overall.pct) ? result[byPct[i-1].roll].rank : i+1;
+    result[x.roll] = { rank, relGrade: null };
+  });
+
+  // Relative grade: split PASSED students (>=33% overall) into 8 equal-as-possible bands
+  // by percentage, top band = A1 ... bottom band = D2. Below 33% = E, regardless of rank.
+  const passed = withMarks.filter(x=>x.overall.pct>=33).sort((a,b)=> b.overall.pct - a.overall.pct);
+  const failed = withMarks.filter(x=>x.overall.pct<33);
+  const labels = ["A1","A2","B1","B2","C1","C2","D1","D2"];
+  const N = passed.length;
+  passed.forEach((x,i)=>{
+    let idx = N>0 ? Math.floor(i*8/N) : 0;
+    if(idx>7) idx=7;
+    result[x.roll].relGrade = labels[idx];
+  });
+  // Ties at a band boundary all get the more generous (higher) grade of the group.
+  for(let i=1;i<N;i++){
+    if(passed[i].overall.pct===passed[i-1].overall.pct){
+      result[passed[i].roll].relGrade = result[passed[i-1].roll].relGrade;
+    }
+  }
+  failed.forEach(x=>{ result[x.roll].relGrade = "E"; });
+
+  return result; // {roll: {rank, relGrade}}
 }
 function log(r, action){ r.history.unshift(nowStr()+" — "+action); saveDB(); }
 
@@ -801,6 +846,7 @@ function wirePrincipalTabs(){
   const st = document.getElementById("pTabStudents"); if(st) st.onclick=()=>{ principalPanel="students"; render(); };
   const se = document.getElementById("pTabSettings"); if(se) se.onclick=()=>{ principalPanel="settings"; render(); };
   const fp = document.getElementById("pTabFacPhotos"); if(fp) fp.onclick=()=>{ principalPanel="facphotos"; render(); };
+  const subjTab = document.getElementById("pTabSubjects"); if(subjTab) subjTab.onclick=()=>{ principalPanel="subjects"; render(); };
   const ac = document.getElementById("pTabAccount"); if(ac) ac.onclick=()=>{ principalPanel="account"; render(); };
 }
 let principalSelectedExamKey = null;
@@ -1746,7 +1792,8 @@ function renderTeacherDash(){
 
   const panelTabs = `
     <div style="margin-bottom:16px;">
-      <button class="btn ${teacherPanel==='marks'?'btn-primary':'btn-outline'} btn-sm" id="tabMarks" style="margin-right:8px;">📝 Marks Entry</button>
+      ${classKey!=="NONE" ? `<button class="btn ${teacherPanel==='marks'?'btn-primary':'btn-outline'} btn-sm" id="tabMarks" style="margin-right:8px;">✅ Verify &amp; Submit Marks</button>` : ""}
+      <button class="btn ${teacherPanel==='subjectmarks'?'btn-primary':'btn-outline'} btn-sm" id="tabSubjectMarks" style="margin-right:8px;">📝 Enter Subject Marks</button>
       <button class="btn ${teacherPanel==='students'?'btn-primary':'btn-outline'} btn-sm" id="tabStudents" style="margin-right:8px;">👨‍👩‍👧 My Students</button>
       <button class="btn ${teacherPanel==='attendance'?'btn-primary':'btn-outline'} btn-sm" id="tabAttendance" style="margin-right:8px;">📋 Attendance</button>
       <button class="btn ${teacherPanel==='leave'?'btn-primary':'btn-outline'} btn-sm" id="tabLeave" style="margin-right:8px;">🗓 Leave Application</button>
@@ -1759,6 +1806,10 @@ function renderTeacherDash(){
   }
   if(teacherPanel === "account"){
     renderTeacherAccountPanel(t, panelTabs);
+    return;
+  }
+  if(teacherPanel === "subjectmarks"){
+    renderTeacherSubjectMarksPanel(t, panelTabs);
     return;
   }
   if(teacherPanel === "attendance" && classKey!=="NONE"){
@@ -1776,15 +1827,16 @@ function renderTeacherDash(){
       <div class="card">
         ${teacherHeaderHtml(t, t.designation+" · Not a Class Teacher")}
         ${panelTabs}
-        <div class="locked-note">You are marked as <b>Not a Class Teacher</b>, so no class result sheet is assigned to you. You can still apply for leave from the tab above. Contact the Principal if this needs to change.</div>
+        <div class="locked-note">You are marked as <b>Not a Class Teacher</b>, so no class result sheet is assigned to you. You can still enter your subject's marks from the "Enter Subject Marks" tab above, apply for leave, or contact the Principal if this needs to change.</div>
       </div>
     `;
     document.getElementById("back").onclick=()=>{session=null;teacherSelectedExam=null;teacherPanel="marks";go("home");};
-    document.getElementById("tabMarks").onclick=()=>{ teacherPanel="marks"; render(); };
+    const tabMkBtn = document.getElementById("tabMarks"); if(tabMkBtn) tabMkBtn.onclick=()=>{ teacherPanel="marks"; render(); };
     document.getElementById("tabLeave").onclick=()=>{ teacherPanel="leave"; render(); };
     document.getElementById("tabAccount").onclick=()=>{ teacherPanel="account"; render(); };
   const tabAttBtn = document.getElementById("tabAttendance"); if(tabAttBtn) tabAttBtn.onclick=()=>{ teacherPanel="attendance"; render(); };
   const tabStuBtn = document.getElementById("tabStudents"); if(tabStuBtn) tabStuBtn.onclick=()=>{ teacherPanel="students"; render(); };
+  const tabSubMkBtn = document.getElementById("tabSubjectMarks"); if(tabSubMkBtn) tabSubMkBtn.onclick=()=>{ teacherPanel="subjectmarks"; render(); };
     const pyqBtn = document.getElementById("tabPyq");
     if(pyqBtn) pyqBtn.onclick=()=>{ teacherPanel="pyq"; render(); };
     const libBtn = document.getElementById("tabLibrary");
@@ -1806,16 +1858,20 @@ function renderTeacherDash(){
 
   const subjectHeaders = r.subjects.map((s,si)=>{
     const inactive = Number(s.maxMarks)===0;
+    const editor = r.subjectEditors && r.subjectEditors[s.name];
+    const filledCount = roster.filter(stu=>markFor(r,stu.roll,s.name)!=="").length;
     return `
     <th style="${inactive?'opacity:0.5;':''}">
       ${s.name}<br>
       <span style="font-weight:400;font-size:10.5px;">out of
         <input class="maxmarks-box" data-si="${si}" type="number" min="0" value="${s.maxMarks}" ${locked?"disabled":""} style="width:52px;padding:3px 4px;">
       </span>
-      ${inactive?'<br><span style="font-size:9.5px;color:var(--red);">Not held this exam</span>':''}
+      ${inactive?'<br><span style="font-size:9.5px;color:var(--red);">Not held this exam</span>':
+        `<br><span style="font-size:9.5px;color:var(--muted);">${filledCount}/${roster.length} filled${editor?` · by ${editor}`:""}</span>`}
     </th>`;
   }).join("");
 
+  const ranksAndGrades = classRanksAndGrades(classKey, r);
   const rows = roster.map(s=>{
     const cells = r.subjects.map(sub=>{
       const inactive = Number(sub.maxMarks)===0;
@@ -1824,7 +1880,8 @@ function renderTeacherDash(){
       return `<td><input class="mark-box" data-roll="${s.roll}" data-subject="${sub.name}" type="number" min="0" max="${sub.maxMarks}" value="${m}" ${locked?"disabled":""} style="width:56px;"></td>`;
     }).join("");
     const ov = studentOverall(r, s.roll);
-    return `<tr><td>${s.roll}</td><td>${s.name}</td>${cells}<td>${ov?ov.pct.toFixed(1)+"%":"—"}</td><td>${ov?grade(ov.pct,100):"—"}</td></tr>`;
+    const rg = ranksAndGrades[s.roll];
+    return `<tr><td>${s.roll}</td><td>${s.name}</td>${cells}<td>${ov?ov.pct.toFixed(1)+"%":"—"}</td><td>${rg?rg.rank:"—"}</td><td>${rg?rg.relGrade:"—"}</td></tr>`;
   }).join("");
 
   let statusBadge, actionButtons;
@@ -1873,7 +1930,7 @@ function renderTeacherDash(){
       ${roster.length ? `
       <div class="scrollbox" style="margin-top:10px;">
         <table>
-          <tr><th>Roll</th><th>Name</th>${subjectHeaders}<th>Overall %</th><th>Grade</th></tr>
+          <tr><th>Roll</th><th>Name</th>${subjectHeaders}<th>Overall %</th><th>Rank</th><th>Grade</th></tr>
           ${rows}
         </table>
       </div>
@@ -1882,11 +1939,12 @@ function renderTeacherDash(){
     </div>
   `;
   document.getElementById("back").onclick=()=>{session=null;teacherSelectedExam=null;teacherPanel="marks";go("home");};
-  document.getElementById("tabMarks").onclick=()=>{ teacherPanel="marks"; render(); };
+  const tabMkBtn = document.getElementById("tabMarks"); if(tabMkBtn) tabMkBtn.onclick=()=>{ teacherPanel="marks"; render(); };
   document.getElementById("tabLeave").onclick=()=>{ teacherPanel="leave"; render(); };
   document.getElementById("tabAccount").onclick=()=>{ teacherPanel="account"; render(); };
   const tabAttBtn = document.getElementById("tabAttendance"); if(tabAttBtn) tabAttBtn.onclick=()=>{ teacherPanel="attendance"; render(); };
   const tabStuBtn = document.getElementById("tabStudents"); if(tabStuBtn) tabStuBtn.onclick=()=>{ teacherPanel="students"; render(); };
+  const tabSubMkBtn = document.getElementById("tabSubjectMarks"); if(tabSubMkBtn) tabSubMkBtn.onclick=()=>{ teacherPanel="subjectmarks"; render(); };
   const pyqTabBtn = document.getElementById("tabPyq");
   if(pyqTabBtn) pyqTabBtn.onclick=()=>{ teacherPanel="pyq"; render(); };
   const libTabBtn = document.getElementById("tabLibrary");
@@ -1905,7 +1963,12 @@ function renderTeacherDash(){
       };
     });
     document.querySelectorAll(".mark-box").forEach(inp=>{
-      inp.oninput=(e)=>{ setMarkFor(r, e.target.dataset.roll, e.target.dataset.subject, e.target.value); saveDB(); };
+      inp.oninput=(e)=>{
+        setMarkFor(r, e.target.dataset.roll, e.target.dataset.subject, e.target.value);
+        if(!r.subjectEditors) r.subjectEditors = {};
+        r.subjectEditors[e.target.dataset.subject] = t.name;
+        saveDB();
+      };
     });
     const bulkBtn = document.getElementById("bulkImportBtn");
     if(bulkBtn) bulkBtn.onclick=()=>{
@@ -2038,12 +2101,14 @@ function renderTeacherLeavePanel(t, panelTabs){
   `;
   document.getElementById("lvBalanceBox").onclick=()=>{ leaveBalanceExpanded = !leaveBalanceExpanded; render(); };
   document.getElementById("back").onclick=()=>{session=null;teacherPanel="marks";go("home");};
-  document.getElementById("tabMarks").onclick=()=>{ teacherPanel="marks"; render(); };
+  const tabMkBtn = document.getElementById("tabMarks"); if(tabMkBtn) tabMkBtn.onclick=()=>{ teacherPanel="marks"; render(); };
   document.getElementById("tabStudents").onclick=()=>{ teacherPanel="students"; render(); };
+  document.getElementById("tabSubjectMarks").onclick=()=>{ teacherPanel="subjectmarks"; render(); };
   document.getElementById("tabLeave").onclick=()=>{ teacherPanel="leave"; render(); };
   document.getElementById("tabAccount").onclick=()=>{ teacherPanel="account"; render(); };
   const tabAttBtn = document.getElementById("tabAttendance"); if(tabAttBtn) tabAttBtn.onclick=()=>{ teacherPanel="attendance"; render(); };
   const tabStuBtn = document.getElementById("tabStudents"); if(tabStuBtn) tabStuBtn.onclick=()=>{ teacherPanel="students"; render(); };
+  const tabSubMkBtn = document.getElementById("tabSubjectMarks"); if(tabSubMkBtn) tabSubMkBtn.onclick=()=>{ teacherPanel="subjectmarks"; render(); };
   const pyqTabBtn2 = document.getElementById("tabPyq");
   if(pyqTabBtn2) pyqTabBtn2.onclick=()=>{ teacherPanel="pyq"; render(); };
   const libTabBtn2 = document.getElementById("tabLibrary");
@@ -2086,12 +2151,14 @@ function renderTeacherAccountPanel(t, panelTabs){
     </div>
   `;
   document.getElementById("back").onclick=()=>{session=null;teacherPanel="marks";go("home");};
-  document.getElementById("tabMarks").onclick=()=>{ teacherPanel="marks"; render(); };
+  const tabMkBtn = document.getElementById("tabMarks"); if(tabMkBtn) tabMkBtn.onclick=()=>{ teacherPanel="marks"; render(); };
   document.getElementById("tabStudents").onclick=()=>{ teacherPanel="students"; render(); };
+  document.getElementById("tabSubjectMarks").onclick=()=>{ teacherPanel="subjectmarks"; render(); };
   document.getElementById("tabLeave").onclick=()=>{ teacherPanel="leave"; render(); };
   document.getElementById("tabAccount").onclick=()=>{ teacherPanel="account"; render(); };
   const tabAttBtn = document.getElementById("tabAttendance"); if(tabAttBtn) tabAttBtn.onclick=()=>{ teacherPanel="attendance"; render(); };
   const tabStuBtn = document.getElementById("tabStudents"); if(tabStuBtn) tabStuBtn.onclick=()=>{ teacherPanel="students"; render(); };
+  const tabSubMkBtn = document.getElementById("tabSubjectMarks"); if(tabSubMkBtn) tabSubMkBtn.onclick=()=>{ teacherPanel="subjectmarks"; render(); };
   const pyqTabBtn3 = document.getElementById("tabPyq");
   if(pyqTabBtn3) pyqTabBtn3.onclick=()=>{ teacherPanel="pyq"; render(); };
   const libTabBtn3 = document.getElementById("tabLibrary");
@@ -2152,14 +2219,16 @@ function downloadMarksExcel(classKey, examKey){
   if(!rr){ alert("No marks have been entered for this exam yet."); return; }
   const activeSubjects = rr.subjects.filter(s=>Number(s.maxMarks)!==0);
   const title = `${classLabel(classKey).toUpperCase()} — ${examLabel(examKey).toUpperCase()} — RESULT — SESSION 2026-27`;
-  const headerRow = ["Roll No", "Student Name", ...activeSubjects.map(s=>s.name), "Total", "%", "Grade"];
+  const headerRow = ["Roll No", "Student Name", ...activeSubjects.map(s=>s.name), "Total", "%", "Rank", "Grade"];
+  const ranksAndGrades = classRanksAndGrades(classKey, rr);
   const dataRows = roster.map(s=>{
     const ov = studentOverall(rr, s.roll);
+    const rg = ranksAndGrades[s.roll];
     const marksVals = activeSubjects.map(sub=>{
       const m = markFor(rr, s.roll, sub.name);
       return m!==""&&m!=null ? m : "AB";
     });
-    return [s.roll, s.name, ...marksVals, ov?ov.scored:"—", ov?ov.pct.toFixed(2):"—", ov?grade(ov.pct,100):"—"];
+    return [s.roll, s.name, ...marksVals, ov?ov.scored:"—", ov?ov.pct.toFixed(2):"—", rg?rg.rank:"—", rg?rg.relGrade:"—"];
   });
   const aoa = [[title], [], headerRow, ...dataRows];
   const ws = XLSX.utils.aoa_to_sheet(aoa);
@@ -2250,6 +2319,80 @@ async function syncAttendanceFromSheet(classKey){
 }
 
 
+/* ---------------- TEACHER: SUBJECT MARKS ENTRY — any teacher can pick a class + exam +
+   their own subject and fill in just that column. Class Teacher later reviews everything
+   together in "Verify & Submit". Locked once the sheet is submitted/published. ---------------- */
+let subjMarksClass = null, subjMarksExam = null, subjMarksSubject = null;
+function renderTeacherSubjectMarksPanel(t, panelTabs){
+  const classOptions = CLASS_LIST.map(c=>`<option value="${c.key}" ${subjMarksClass===c.key?"selected":""}>${c.label}</option>`).join("");
+  const examOptions = subjMarksClass ? examsForClass(subjMarksClass).map(e=>`<option value="${e.key}" ${subjMarksExam===e.key?"selected":""}>${e.label}</option>`).join("") : "";
+  let rr = null, subjectOptions = "";
+  if(subjMarksClass && subjMarksExam){
+    rr = getResult(subjMarksClass, subjMarksExam);
+    subjectOptions = rr.subjects.map(s=>`<option value="${s.name}" ${subjMarksSubject===s.name?"selected":""}>${s.name}${Number(s.maxMarks)===0?" (not held)":""}</option>`).join("");
+  }
+
+  let tableHtml = "";
+  if(rr && subjMarksSubject){
+    const subjObj = rr.subjects.find(s=>s.name===subjMarksSubject);
+    const locked = rr.status !== "draft";
+    const notHeld = subjObj && Number(subjObj.maxMarks)===0;
+    const roster = studentsForClass(subjMarksClass);
+    const lastEditor = rr.subjectEditors && rr.subjectEditors[subjMarksSubject];
+    const rows = roster.map(s=>`
+      <tr>
+        <td>${s.roll}</td><td>${s.name}</td>
+        <td><input class="subjmark-box" data-roll="${s.roll}" type="number" style="width:70px;" value="${markFor(rr,s.roll,subjMarksSubject)}" ${locked||notHeld?"disabled":""}></td>
+      </tr>`).join("");
+    tableHtml = `
+      <div class="locked-note" style="margin-top:14px;">
+        ${notHeld ? `This subject is marked "not held" (Out of = 0) for this exam by the Class Teacher, so it can't be filled.` :
+          locked ? `This result sheet is <b>${rr.status}</b> — no longer editable.` :
+          `Enter marks out of <b>${subjObj?subjObj.maxMarks:100}</b> for <b>${subjMarksSubject}</b>. Saves automatically as you type.`}
+        ${lastEditor ? `<br>Last entered by: <b>${lastEditor}</b>` : ""}
+      </div>
+      <div class="scrollbox" style="margin-top:10px;">
+        <table><tr><th>Roll</th><th>Name</th><th>${subjMarksSubject}${subjObj?` (out of ${subjObj.maxMarks})`:""}</th></tr>${rows}</table>
+      </div>`;
+  }
+
+  app.innerHTML = `
+    <button class="back-link" id="back">&larr; Logout</button>
+    <div class="card">
+      ${teacherHeaderHtml(t, t.designation)}
+      ${panelTabs}
+      <div class="locked-note">Pick the class, exam, and the one subject you teach there. This is separate from being that class's Class Teacher — any teacher can fill in their own subject here.</div>
+      <label>Class</label>
+      <select id="subjSelClass"><option value="">— Select class —</option>${classOptions}</select>
+      ${subjMarksClass ? `<label>Exam</label><select id="subjSelExam"><option value="">— Select exam —</option>${examOptions}</select>` : ""}
+      ${subjMarksClass && subjMarksExam ? `<label>Subject</label><select id="subjSelSubject"><option value="">— Select subject —</option>${subjectOptions}</select>` : ""}
+      ${tableHtml}
+    </div>
+  `;
+  document.getElementById("back").onclick=()=>{session=null;go("home");};
+  document.getElementById("tabSubjectMarks").onclick=()=>{ teacherPanel="subjectmarks"; render(); };
+  const tabMk = document.getElementById("tabMarks"); if(tabMk) tabMk.onclick=()=>{ teacherPanel="marks"; render(); };
+  document.getElementById("tabStudents").onclick=()=>{ teacherPanel="students"; render(); };
+  const tabAtt = document.getElementById("tabAttendance"); if(tabAtt) tabAtt.onclick=()=>{ teacherPanel="attendance"; render(); };
+  document.getElementById("tabLeave").onclick=()=>{ teacherPanel="leave"; render(); };
+  document.getElementById("tabAccount").onclick=()=>{ teacherPanel="account"; render(); };
+
+  document.getElementById("subjSelClass").onchange=(e)=>{ subjMarksClass=e.target.value||null; subjMarksExam=null; subjMarksSubject=null; render(); };
+  const examSel = document.getElementById("subjSelExam");
+  if(examSel) examSel.onchange=(e)=>{ subjMarksExam=e.target.value||null; subjMarksSubject=null; render(); };
+  const subjSel = document.getElementById("subjSelSubject");
+  if(subjSel) subjSel.onchange=(e)=>{ subjMarksSubject=e.target.value||null; render(); };
+
+  document.querySelectorAll(".subjmark-box").forEach(inp=>{
+    inp.oninput=(e)=>{
+      setMarkFor(rr, e.target.dataset.roll, subjMarksSubject, e.target.value);
+      if(!rr.subjectEditors) rr.subjectEditors = {};
+      rr.subjectEditors[subjMarksSubject] = t.name;
+      saveDB();
+    };
+  });
+}
+
 function renderTeacherAttendancePanel(t, panelTabs, classKey, isAssociate){
   const roster = studentsForClass(classKey);
   const att = getClassAttendance(classKey);
@@ -2303,8 +2446,9 @@ function renderTeacherAttendancePanel(t, panelTabs, classKey, isAssociate){
     }
   };
   document.getElementById("back").onclick=()=>{session=null;teacherPanel="marks";go("home");};
-  document.getElementById("tabMarks").onclick=()=>{ teacherPanel="marks"; render(); };
+  const tabMkBtn = document.getElementById("tabMarks"); if(tabMkBtn) tabMkBtn.onclick=()=>{ teacherPanel="marks"; render(); };
   document.getElementById("tabStudents").onclick=()=>{ teacherPanel="students"; render(); };
+  document.getElementById("tabSubjectMarks").onclick=()=>{ teacherPanel="subjectmarks"; render(); };
   document.getElementById("tabLeave").onclick=()=>{ teacherPanel="leave"; render(); };
   document.getElementById("tabAccount").onclick=()=>{ teacherPanel="account"; render(); };
   document.getElementById("tabAttendance").onclick=()=>{ teacherPanel="attendance"; render(); };
@@ -2348,8 +2492,9 @@ function renderTeacherStudentsPanel(t, panelTabs, classKey, isAssociate){
     </div>
   `;
   document.getElementById("back").onclick=()=>{session=null;teacherPanel="marks";go("home");};
-  document.getElementById("tabMarks").onclick=()=>{ teacherPanel="marks"; render(); };
+  const tabMkBtn = document.getElementById("tabMarks"); if(tabMkBtn) tabMkBtn.onclick=()=>{ teacherPanel="marks"; render(); };
   document.getElementById("tabStudents").onclick=()=>{ teacherPanel="students"; render(); };
+  document.getElementById("tabSubjectMarks").onclick=()=>{ teacherPanel="subjectmarks"; render(); };
   document.getElementById("tabLeave").onclick=()=>{ teacherPanel="leave"; render(); };
   document.getElementById("tabAccount").onclick=()=>{ teacherPanel="account"; render(); };
   const tabAttBtn = document.getElementById("tabAttendance"); if(tabAttBtn) tabAttBtn.onclick=()=>{ teacherPanel="attendance"; render(); };
@@ -2902,6 +3047,7 @@ function renderPrincipalDash(){
       ${isAdmin ? `<button class="btn ${principalPanel==='students'?'btn-primary':'btn-outline'} btn-sm" id="pTabStudents" style="margin-right:8px;">🎓 Student Management</button>` : ""}
       ${isAdmin ? `<button class="btn ${principalPanel==='settings'?'btn-primary':'btn-outline'} btn-sm" id="pTabSettings" style="margin-right:8px;">⚙️ Site Settings</button>` : ""}
       ${isAdmin ? `<button class="btn ${principalPanel==='facphotos'?'btn-primary':'btn-outline'} btn-sm" id="pTabFacPhotos" style="margin-right:8px;">🏫 Facility Photos</button>` : ""}
+      ${isAdmin ? `<button class="btn ${principalPanel==='subjects'?'btn-primary':'btn-outline'} btn-sm" id="pTabSubjects" style="margin-right:8px;">📚 Subjects</button>` : ""}
       <button class="btn ${principalPanel==='account'?'btn-primary':'btn-outline'} btn-sm" id="pTabAccount">🔑 Change / Forgot Password</button>
     </div>`;
 
@@ -2943,6 +3089,10 @@ function renderPrincipalDash(){
   }
   if(principalPanel === "facphotos" && isAdmin){
     renderAdminFacilityPhotosPanel(panelTabs);
+    return;
+  }
+  if(principalPanel === "subjects" && isAdmin){
+    renderAdminSubjectsPanel(panelTabs);
     return;
   }
   if(principalPanel === "account"){
@@ -2997,6 +3147,7 @@ function renderPrincipalDash(){
           const inactive = Number(s.maxMarks)===0;
           return `<th style="${inactive?'opacity:0.5;':''}">${s.name}<br><span style="font-weight:400;font-size:10.5px;">${inactive?'Not held':'/ '+s.maxMarks}</span></th>`;
         }).join("");
+        const ranksAndGrades2 = classRanksAndGrades(classKey, rr);
         const rows2 = roster.map(s=>{
           const cells = rr.subjects.map(sub=>{
             if(Number(sub.maxMarks)===0) return `<td style="background:#f2f2f2;text-align:center;color:var(--muted);">—</td>`;
@@ -3004,7 +3155,8 @@ function renderPrincipalDash(){
             return `<td>${m!==""&&m!=null?m:"—"}</td>`;
           }).join("");
           const ov = studentOverall(rr, s.roll);
-          return `<tr><td>${s.roll}</td><td>${s.name}</td>${cells}<td>${ov?ov.pct.toFixed(1)+"%":"—"}</td><td>${ov?grade(ov.pct,100):"—"}</td></tr>`;
+          const rg = ranksAndGrades2[s.roll];
+          return `<tr><td>${s.roll}</td><td>${s.name}</td>${cells}<td>${ov?ov.pct.toFixed(1)+"%":"—"}</td><td>${rg?rg.rank:"—"}</td><td>${rg?rg.relGrade:"—"}</td></tr>`;
         }).join("");
         let actions;
         if(rr.status==="draft"){
@@ -3020,7 +3172,7 @@ function renderPrincipalDash(){
         detailHtml = `
           <div style="margin-top:16px;border-top:1px solid var(--line);padding-top:16px;">
             <h4 style="color:var(--navy)">${examLabel(principalSelectedExamKey)} — All Subjects</h4>
-            <div class="scrollbox"><table><tr><th>Roll</th><th>Name</th>${subjHeaders}<th>Overall %</th><th>Grade</th></tr>${rows2}</table></div>
+            <div class="scrollbox"><table><tr><th>Roll</th><th>Name</th>${subjHeaders}<th>Overall %</th><th>Rank</th><th>Grade</th></tr>${rows2}</table></div>
             <div style="margin-top:10px;">${actions}</div>
             <div class="hist">${rr.history.length? "<b>History:</b><br>"+rr.history.join("<br>") : ""}</div>
           </div>
@@ -4100,6 +4252,118 @@ function renderAdminFacilityPhotosPanel(panelTabs){
   wireChangePassword(session.role, actor.id, actor.password);
 }
 
+/* ---------------- ADMIN — Manage Subjects per class ---------------- */
+let adminSubjectsSelectedClass = null;
+function renderAdminSubjectsPanel(panelTabs){
+  const classNums = ["6","7","8","9","10","11","12"];
+  const classCards = classNums.map(n=>{
+    const sel = adminSubjectsSelectedClass===n ? " sel" : "";
+    return `<button class="btn ${sel?'btn-primary':'btn-outline'} btn-sm" data-cn="${n}" style="margin:0 6px 6px 0;">Class ${n}</button>`;
+  }).join("");
+
+  let detailHtml = "";
+  if(adminSubjectsSelectedClass){
+    const n = adminSubjectsSelectedClass;
+    const subs = subjectsForClass(n);
+    const isCustomized = DB.subjectsByClass && DB.subjectsByClass[n];
+    const rows = subs.map((name,i)=>`
+      <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px;">
+        <input class="subj-name-input" data-idx="${i}" value="${name}" style="flex:1;">
+        <button class="btn btn-red btn-sm" data-delsubj="${i}">Remove</button>
+      </div>
+    `).join("");
+    detailHtml = `
+      <div class="card">
+        <h4 style="color:var(--navy);margin-bottom:10px;">Class ${n} — Subjects</h4>
+        <div class="locked-note">
+          Rename a box and click "Save Changes", or remove a subject, or add a new one.
+          <b>This only affects NEW exam sheets going forward</b> — any exam already started for Class ${n} keeps its existing subject list untouched, so nothing already filled in gets disturbed.
+          ${!isCustomized ? "<br>Currently using the default subject list." : ""}
+        </div>
+        <div style="margin-top:14px;">${rows || '<p style="color:var(--muted);font-size:13px;">No subjects yet.</p>'}</div>
+        <div style="display:flex;gap:8px;margin-top:10px;">
+          <input id="newSubjName" placeholder="New subject name" style="flex:1;">
+          <button class="btn btn-outline" id="addSubjBtn">+ Add Subject</button>
+        </div>
+        <div class="error" id="subjErr" style="margin-top:8px;"></div>
+        <div class="success" id="subjOk"></div>
+        <button class="btn btn-primary" id="saveSubjBtn" style="margin-top:10px;">Save Changes</button>
+        ${isCustomized ? `<button class="btn btn-outline" id="resetSubjBtn" style="margin-top:10px;margin-left:8px;">Reset to Default List</button>` : ""}
+      </div>`;
+  }
+
+  app.innerHTML = `
+    <button class="back-link" id="back">&larr; Logout</button>
+    <div class="card">
+      <h2 style="color:var(--navy)">Welcome, ${currentActor().name}</h2>
+      <p style="color:var(--muted);font-size:13px;">${currentActor().designation}</p>
+      ${panelTabs}
+      <p style="font-size:12px;color:var(--muted);margin-bottom:10px;">Pick a class to add, remove, or rename its subjects.</p>
+      <div>${classCards}</div>
+    </div>
+    ${detailHtml}
+  `;
+  document.getElementById("back").onclick=()=>{session=null;go("home");};
+  wirePrincipalTabs();
+
+  document.querySelectorAll("[data-cn]").forEach(btn=>{
+    btn.onclick=()=>{ adminSubjectsSelectedClass = btn.dataset.cn; render(); };
+  });
+
+  const addBtn = document.getElementById("addSubjBtn");
+  if(addBtn) addBtn.onclick=()=>{
+    const nameInp = document.getElementById("newSubjName");
+    const name = nameInp.value.trim();
+    const errEl = document.getElementById("subjErr"); errEl.textContent="";
+    if(!name){ errEl.textContent="Please type a subject name first."; return; }
+    const n = adminSubjectsSelectedClass;
+    const current = subjectsForClass(n).slice();
+    if(current.some(s=>s.toLowerCase()===name.toLowerCase())){ errEl.textContent="This subject already exists in this class."; return; }
+    current.push(name);
+    if(!DB.subjectsByClass) DB.subjectsByClass = {};
+    DB.subjectsByClass[n] = current;
+    saveDB();
+    render();
+  };
+
+  document.querySelectorAll("[data-delsubj]").forEach(btn=>{
+    btn.onclick=()=>{
+      if(!confirm("Remove this subject from Class "+adminSubjectsSelectedClass+"'s list? This only affects new exam sheets going forward.")) return;
+      const n = adminSubjectsSelectedClass;
+      const current = subjectsForClass(n).slice();
+      current.splice(Number(btn.dataset.delsubj), 1);
+      if(!DB.subjectsByClass) DB.subjectsByClass = {};
+      DB.subjectsByClass[n] = current;
+      saveDB();
+      render();
+    };
+  });
+
+  const saveBtn = document.getElementById("saveSubjBtn");
+  if(saveBtn) saveBtn.onclick=()=>{
+    const n = adminSubjectsSelectedClass;
+    const errEl = document.getElementById("subjErr"); errEl.textContent="";
+    const inputs = document.querySelectorAll(".subj-name-input");
+    const names = Array.from(inputs).map(i=>i.value.trim());
+    if(names.some(nm=>!nm)){ errEl.textContent="Subject names can't be empty — remove the row instead if you don't need it."; return; }
+    const lower = names.map(nm=>nm.toLowerCase());
+    if(new Set(lower).size !== lower.length){ errEl.textContent="Two subjects can't have the same name."; return; }
+    if(!DB.subjectsByClass) DB.subjectsByClass = {};
+    DB.subjectsByClass[n] = names;
+    saveDB();
+    document.getElementById("subjOk").textContent = "Saved — new exam sheets for Class "+n+" will use this list.";
+    setTimeout(render, 700);
+  };
+
+  const resetBtn = document.getElementById("resetSubjBtn");
+  if(resetBtn) resetBtn.onclick=()=>{
+    if(!confirm("Reset Class "+adminSubjectsSelectedClass+" back to the default subject list?")) return;
+    delete DB.subjectsByClass[adminSubjectsSelectedClass];
+    saveDB();
+    render();
+  };
+}
+
 /* ---------------- PRINCIPAL / ADMIN — Change / Forgot Password ---------------- */
 function renderPrincipalAccountPanel(panelTabs){
   const actor = currentActor();
@@ -4203,11 +4467,15 @@ function renderStudentDash(){
       if(m===""||m==null) return "";
       return `<tr><td>${sub.name}</td><td>${m} / ${sub.maxMarks}</td><td class="gradecell">${grade(m, sub.maxMarks)}</td></tr>`;
     }).join("");
+    const ranksAndGrades = classRanksAndGrades(classKey, rr);
+    const rg = ranksAndGrades[stu.roll];
     return `
       <div class="card" style="margin-top:14px;">
         <h4 style="color:var(--navy);margin-bottom:6px;">${e.label}</h4>
         <table class="result-table"><tr><th>Subject</th><th>Marks</th><th>Grade</th></tr>${subjRows}</table>
-        <div class="kv"><span>Overall</span><strong>${ov.scored} / ${ov.max} (${ov.pct.toFixed(1)}%) — Grade ${grade(ov.pct,100)}</strong></div>
+        <div class="kv"><span>Overall</span><strong>${ov.scored} / ${ov.max} (${ov.pct.toFixed(1)}%)</strong></div>
+        ${rg ? `<div class="kv"><span>Class Rank</span><strong>${rg.rank}</strong></div>
+        <div class="kv"><span>Overall Grade</span><strong>${rg.relGrade}</strong></div>` : ""}
       </div>
     `;
   }).filter(Boolean);
