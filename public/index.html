@@ -337,6 +337,7 @@ function sanitizeForFirestore(obj){
   // is a simple, reliable way to drop every undefined value before we ever try to save.
   return JSON.parse(JSON.stringify(obj));
 }
+let saveDBChain = Promise.resolve();
 function saveDB(){
   cacheLocally();
   suppressNextSnapshot.main = true;
@@ -345,14 +346,20 @@ function saveDB(){
   // here would silently erase it. Instead, merge dictionary-shaped fields (results,
   // notices, leaveRequests, etc.) at the record level — this tab's own edits win for
   // any record it touched, but anything added elsewhere in the meantime is kept.
-  (async ()=>{
+  //
+  // Calls are chained (not fired in parallel): if several edits happen in quick
+  // succession (e.g. setting "Out of", then a mark, then Submit), each save must see
+  // the result of the one before it — otherwise an earlier save that's slower to
+  // reach the server can finish last and silently stomp a more recent change.
+  const pendingDB = DB; // snapshot of what THIS call should end up persisting
+  saveDBChain = saveDBChain.then(async ()=>{
     try{
       const snap = await fsdb.collection("appdata").doc("main").get();
       if(snap.exists){
         const server = snap.data();
         const merged = {...server};
-        Object.keys(DB).forEach(key=>{
-          const localVal = DB[key], serverVal = server[key];
+        Object.keys(pendingDB).forEach(key=>{
+          const localVal = pendingDB[key], serverVal = server[key];
           const bothPlainObjects = localVal && typeof localVal==="object" && !Array.isArray(localVal)
             && serverVal && typeof serverVal==="object" && !Array.isArray(serverVal);
           merged[key] = bothPlainObjects ? {...serverVal, ...localVal} : localVal;
@@ -367,7 +374,7 @@ function saveDB(){
     }catch(err){
       console.error("Firestore save failed:", err);
     }
-  })();
+  });
   return true;
 }
 function persistStudents(){
@@ -671,7 +678,7 @@ function getResult(classKey, examKey){
   const k = resultKey(classKey, examKey);
   if(!DB.results[k]){
     const subjects = subjectsForClass(classKey).map(name=>({name, maxMarks:100}));
-    DB.results[k] = { classKey, examKey, subjects, status:"draft", marks:{}, enteredBy:"", editRequested:false, history:[] };
+    DB.results[k] = { classKey, examKey, subjects, status:"draft", marks:{}, subjectLocked:{}, enteredBy:"", editRequested:false, history:[] };
     saveDB();
   }
   // heal older/partial records
@@ -691,6 +698,7 @@ function getResult(classKey, examKey){
     }
   }
   if(!r.marks) r.marks = {};
+  if(!r.subjectLocked) r.subjectLocked = {};
   return r;
 }
 function markFor(r, roll, subjectName){
@@ -1860,6 +1868,7 @@ function renderTeacherDash(){
     const inactive = Number(s.maxMarks)===0;
     const editor = r.subjectEditors && r.subjectEditors[s.name];
     const filledCount = roster.filter(stu=>markFor(r,stu.roll,s.name)!=="").length;
+    const subjLocked = !!(r.subjectLocked && r.subjectLocked[s.name]);
     return `
     <th style="${inactive?'opacity:0.5;':''}">
       ${s.name}<br>
@@ -1868,6 +1877,7 @@ function renderTeacherDash(){
       </span>
       ${inactive?'<br><span style="font-size:9.5px;color:var(--red);">Not held this exam</span>':
         `<br><span style="font-size:9.5px;color:var(--muted);">${filledCount}/${roster.length} filled${editor?` · by ${editor}`:""}</span>`}
+      ${subjLocked && !locked ? `<br><span style="font-size:9.5px;color:var(--red);">🔒 Submitted</span> <button class="btn btn-outline btn-sm" data-unlocksubj="${s.name}" style="font-size:9px;padding:1px 5px;margin-top:2px;">Unlock</button>` : ""}
     </th>`;
   }).join("");
 
@@ -1959,6 +1969,13 @@ function renderTeacherDash(){
       inp.onchange=(e)=>{
         const v = e.target.value.trim();
         r.subjects[Number(e.target.dataset.si)].maxMarks = (v==="" || isNaN(Number(v))) ? 100 : Number(v);
+        saveDB(); render();
+      };
+    });
+    document.querySelectorAll("[data-unlocksubj]").forEach(btn=>{
+      btn.onclick=()=>{
+        if(!r.subjectLocked) r.subjectLocked = {};
+        r.subjectLocked[btn.dataset.unlocksubj] = false;
         saveDB(); render();
       };
     });
@@ -2335,7 +2352,9 @@ function renderTeacherSubjectMarksPanel(t, panelTabs){
   let tableHtml = "";
   if(rr && subjMarksSubject){
     const subjObj = rr.subjects.find(s=>s.name===subjMarksSubject);
-    const locked = rr.status !== "draft";
+    const sheetLocked = rr.status !== "draft";
+    const subjLocked = !!(rr.subjectLocked && rr.subjectLocked[subjMarksSubject]);
+    const locked = sheetLocked || subjLocked;
     const notHeld = subjObj && Number(subjObj.maxMarks)===0;
     const roster = studentsForClass(subjMarksClass);
     const lastEditor = rr.subjectEditors && rr.subjectEditors[subjMarksSubject];
@@ -2346,14 +2365,23 @@ function renderTeacherSubjectMarksPanel(t, panelTabs){
       </tr>`).join("");
     tableHtml = `
       <div class="locked-note" style="margin-top:14px;">
-        ${notHeld ? `This subject is marked "not held" (Out of = 0) for this exam by the Class Teacher, so it can't be filled.` :
-          locked ? `This result sheet is <b>${rr.status}</b> — no longer editable.` :
-          `Enter marks out of <b>${subjObj?subjObj.maxMarks:100}</b> for <b>${subjMarksSubject}</b>. Saves automatically as you type.`}
+        ${sheetLocked ? `This result sheet is <b>${rr.status}</b> — no longer editable.` :
+          subjLocked ? `You have <b>submitted</b> ${subjMarksSubject}'s marks — it's locked. Ask the Class Teacher to unlock it if you need to fix something.` :
+          `Enter marks for <b>${subjMarksSubject}</b>, then set "Out of" below to match this exam, and click Submit when done.`}
         ${lastEditor ? `<br>Last entered by: <b>${lastEditor}</b>` : ""}
       </div>
+      ${!sheetLocked ? `
+        <div style="margin-top:10px;">
+          <label>Out of (max marks for this exam)</label>
+          <input id="subjOutOf" type="number" min="1" value="${subjObj?subjObj.maxMarks:100}" style="width:100px;" ${locked?"disabled":""}>
+        </div>` : ""}
       <div class="scrollbox" style="margin-top:10px;">
         <table><tr><th>Roll</th><th>Name</th><th>${subjMarksSubject}${subjObj?` (out of ${subjObj.maxMarks})`:""}</th></tr>${rows}</table>
-      </div>`;
+      </div>
+      ${!sheetLocked && !notHeld ? (subjLocked
+        ? `<div class="success" style="margin-top:10px;">✅ Submitted — waiting for Class Teacher to review.</div>`
+        : `<button class="btn btn-primary" id="submitSubjBtn" style="margin-top:10px;">Submit ${subjMarksSubject} Marks</button>`) : ""}
+      <div class="error" id="subjMarkErr" style="margin-top:8px;"></div>`;
   }
 
   app.innerHTML = `
@@ -2391,6 +2419,25 @@ function renderTeacherSubjectMarksPanel(t, panelTabs){
       saveDB();
     };
   });
+
+  const outOfInp = document.getElementById("subjOutOf");
+  if(outOfInp) outOfInp.onchange=(e)=>{
+    const subjObj = rr.subjects.find(s=>s.name===subjMarksSubject);
+    if(subjObj) subjObj.maxMarks = Number(e.target.value)||100;
+    saveDB();
+    render();
+  };
+
+  const submitBtn = document.getElementById("submitSubjBtn");
+  if(submitBtn) submitBtn.onclick=()=>{
+    if(!confirm(`Submit ${subjMarksSubject} marks? You won't be able to make further changes unless the Class Teacher unlocks it.`)) return;
+    if(!rr.subjectLocked) rr.subjectLocked = {};
+    rr.subjectLocked[subjMarksSubject] = true;
+    if(!rr.subjectEditors) rr.subjectEditors = {};
+    rr.subjectEditors[subjMarksSubject] = t.name;
+    saveDB();
+    render();
+  };
 }
 
 function renderTeacherAttendancePanel(t, panelTabs, classKey, isAssociate){
