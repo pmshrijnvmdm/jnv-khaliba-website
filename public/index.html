@@ -308,6 +308,9 @@ function defaultDB(){
     subjectsByClass: {},
     classEditRequests: {},
     socialLinks: {},
+    currentSession: "2026-27",
+    sessionArchives: {},
+    alumniStudents: {},
     contactMessages: {}, contactMessageCounter: 0,
     siteContact:{ phone:"+91 7775-XXXXXX", email:"jnvsarguja@nvsrobpt.in" } };
 }
@@ -457,6 +460,43 @@ function nextRollFor(cls, sec){
   });
   const n = (nums.length?Math.max(...nums):0) + 1;
   return `${cls}${sec}${String(n).padStart(2,"0")}`;
+}
+function promoteStudents(classKey, selectedRolls){
+  const cls = classKey.split("-")[0], section = classKey.split("-")[1];
+  const newCls = String(Number(cls)+1);
+  const errors = [];
+  let promoted = 0;
+  STUDENTS.forEach(s=>{
+    if(s.cls!==cls || s.section!==section) return;
+    if(!selectedRolls.includes(s.roll)) return;
+    // Roll formats aren't 100% consistent across classes (e.g. some classes embed the
+    // section letter like "9A01", others don't like "1001") — safest is to replace just
+    // the leading old-class digits with the new class number, whatever follows it.
+    const newRoll = s.roll.startsWith(cls) ? (newCls + s.roll.slice(cls.length)) : (newCls + s.roll);
+    const collision = STUDENTS.some(x=>x!==s && x.cls===newCls && x.section===section && x.roll===newRoll);
+    if(collision){ errors.push(`${s.name} (was ${s.roll}) — ${newRoll} already exists in Class ${newCls}-${section}, skipped`); return; }
+    s.cls = newCls;
+    s.roll = newRoll;
+    promoted++;
+  });
+  return { promoted, errors };
+}
+function passOutStudents(classKey, selectedRolls, session){
+  const cls = classKey.split("-")[0], section = classKey.split("-")[1];
+  if(!DB.alumniStudents[session]) DB.alumniStudents[session] = [];
+  let count = 0;
+  STUDENTS = STUDENTS.filter(s=>{
+    if(s.cls===cls && s.section===section && selectedRolls.includes(s.roll)){
+      DB.alumniStudents[session].push({ ...s, passedOutSession: session, passedOutOn: nowStr() });
+      count++;
+      return false;
+    }
+    return true;
+  });
+  return count;
+}
+function archiveCurrentSessionRoster(){
+  DB.sessionArchives[currentSession()] = JSON.parse(JSON.stringify(STUDENTS));
 }
 function nextTeacherPassword(name){
   const first = (name||"Staff").split(" ")[0].replace(/[^A-Za-z]/g,"") || "Staff";
@@ -672,6 +712,7 @@ function studentsForClass(key){
   return STUDENTS.filter(s=>s.cls===cls && s.section===section).sort((a,b)=>a.roll.localeCompare(b.roll, undefined, {numeric:true}));
 }
 function classNumber(classKey){ return classKey.split("-")[0]; }
+function currentSession(){ return DB.currentSession || "2026-27"; }
 function subjectGroupLabel(key){
   const map = {"6":"Class 6","7":"Class 7","8":"Class 8","9":"Class 9","10":"Class 10","11":"Class 11","12":"Class 12"};
   return map[key] || key;
@@ -872,6 +913,8 @@ function wirePrincipalTabs(){
   const se = document.getElementById("pTabSettings"); if(se) se.onclick=()=>{ principalPanel="settings"; render(); };
   const fp = document.getElementById("pTabFacPhotos"); if(fp) fp.onclick=()=>{ principalPanel="facphotos"; render(); };
   const subjTab = document.getElementById("pTabSubjects"); if(subjTab) subjTab.onclick=()=>{ principalPanel="subjects"; render(); };
+  const promoteTab = document.getElementById("pTabPromote"); if(promoteTab) promoteTab.onclick=()=>{ principalPanel="promote"; render(); };
+  const sessHistTab = document.getElementById("pTabSessionHistory"); if(sessHistTab) sessHistTab.onclick=()=>{ principalPanel="sessionhistory"; render(); };
   const ac = document.getElementById("pTabAccount"); if(ac) ac.onclick=()=>{ principalPanel="account"; render(); };
 }
 let principalSelectedExamKey = null;
@@ -1347,14 +1390,14 @@ function renderPublicBlogPage(){
   const rows = posts.map(p=>`
     <div class="fac-card fac-plain" style="margin-bottom:10px;">
       <h4 style="color:var(--navy);font-size:14px;">${p.title}</h4>
-      <p style="font-size:11px;color:var(--muted);margin:4px 0 8px;">${p.addedOn}</p>
+      <p style="font-size:11px;color:var(--muted);margin:4px 0 8px;">${p.author?p.author+" · ":""}${p.addedOn}</p>
       <div style="white-space:pre-wrap;font-size:13px;color:#4a4534;line-height:1.5;">${renderSimpleFormatting(p.content)}</div>
     </div>
   `).join("");
   app.innerHTML = `
     <div class="card">
       <h2 style="color:var(--navy)">Blog</h2>
-      <p style="font-size:13px;color:var(--muted);margin-top:6px;">Posts from the school Library.</p>
+      <p style="font-size:13px;color:var(--muted);margin-top:6px;">Posts from our teachers and school Library.</p>
     </div>
     <div class="card">
       ${posts.length ? rows : `<p style="color:var(--muted);font-size:13.5px;">No blog posts published yet.</p>`}
@@ -1370,7 +1413,7 @@ function renderPublicCareerGuidancePage(){
   const rows = posts.map(p=>`
     <div class="fac-card fac-plain" style="margin-bottom:10px;">
       <h4 style="color:var(--navy);font-size:14px;">${p.title}</h4>
-      <p style="font-size:11px;color:var(--muted);margin:4px 0 8px;">${p.addedOn}</p>
+      <p style="font-size:11px;color:var(--muted);margin:4px 0 8px;">${p.author?p.author+" · ":""}${p.addedOn}</p>
       <div style="white-space:pre-wrap;font-size:13px;color:#4a4534;line-height:1.5;">${renderSimpleFormatting(p.content)}</div>
     </div>
   `).join("");
@@ -1837,6 +1880,8 @@ function renderTeacherDash(){
       <button class="btn ${teacherPanel==='students'?'btn-primary':'btn-outline'} btn-sm" id="tabStudents" style="margin-right:8px;">👨‍👩‍👧 My Students</button>
       <button class="btn ${teacherPanel==='attendance'?'btn-primary':'btn-outline'} btn-sm" id="tabAttendance" style="margin-right:8px;">📋 Attendance</button>
       <button class="btn ${teacherPanel==='leave'?'btn-primary':'btn-outline'} btn-sm" id="tabLeave" style="margin-right:8px;">🗓 Leave Application</button>
+      <button class="btn ${teacherPanel==='blog'?'btn-primary':'btn-outline'} btn-sm" id="tabBlog" style="margin-right:8px;">📝 Blog</button>
+      <button class="btn ${teacherPanel==='guidance'?'btn-primary':'btn-outline'} btn-sm" id="tabGuidance" style="margin-right:8px;">🎯 Career Guidance</button>
       <button class="btn ${teacherPanel==='account'?'btn-primary':'btn-outline'} btn-sm" id="tabAccount">🔑 Change / Forgot Password</button>
     </div>`;
 
@@ -1846,6 +1891,14 @@ function renderTeacherDash(){
   }
   if(teacherPanel === "account"){
     renderTeacherAccountPanel(t, panelTabs);
+    return;
+  }
+  if(teacherPanel === "blog"){
+    renderTeacherBlogPanel(t, panelTabs);
+    return;
+  }
+  if(teacherPanel === "guidance"){
+    renderTeacherCareerGuidePanel(t, panelTabs);
     return;
   }
   if(teacherPanel === "subjectmarks"){
@@ -1873,6 +1926,8 @@ function renderTeacherDash(){
     document.getElementById("back").onclick=()=>{session=null;teacherSelectedExam=null;teacherPanel="marks";go("home");};
     const tabMkBtn = document.getElementById("tabMarks"); if(tabMkBtn) tabMkBtn.onclick=()=>{ teacherPanel="marks"; render(); };
     document.getElementById("tabLeave").onclick=()=>{ teacherPanel="leave"; render(); };
+  const tabBlogBtn = document.getElementById("tabBlog"); if(tabBlogBtn) tabBlogBtn.onclick=()=>{ teacherPanel="blog"; render(); };
+  const tabGuidBtn = document.getElementById("tabGuidance"); if(tabGuidBtn) tabGuidBtn.onclick=()=>{ teacherPanel="guidance"; render(); };
     document.getElementById("tabAccount").onclick=()=>{ teacherPanel="account"; render(); };
   const tabAttBtn = document.getElementById("tabAttendance"); if(tabAttBtn) tabAttBtn.onclick=()=>{ teacherPanel="attendance"; render(); };
   const tabStuBtn = document.getElementById("tabStudents"); if(tabStuBtn) tabStuBtn.onclick=()=>{ teacherPanel="students"; render(); };
@@ -1983,6 +2038,8 @@ function renderTeacherDash(){
   document.getElementById("back").onclick=()=>{session=null;teacherSelectedExam=null;teacherPanel="marks";go("home");};
   const tabMkBtn = document.getElementById("tabMarks"); if(tabMkBtn) tabMkBtn.onclick=()=>{ teacherPanel="marks"; render(); };
   document.getElementById("tabLeave").onclick=()=>{ teacherPanel="leave"; render(); };
+  const tabBlogBtn = document.getElementById("tabBlog"); if(tabBlogBtn) tabBlogBtn.onclick=()=>{ teacherPanel="blog"; render(); };
+  const tabGuidBtn = document.getElementById("tabGuidance"); if(tabGuidBtn) tabGuidBtn.onclick=()=>{ teacherPanel="guidance"; render(); };
   document.getElementById("tabAccount").onclick=()=>{ teacherPanel="account"; render(); };
   const tabAttBtn = document.getElementById("tabAttendance"); if(tabAttBtn) tabAttBtn.onclick=()=>{ teacherPanel="attendance"; render(); };
   const tabStuBtn = document.getElementById("tabStudents"); if(tabStuBtn) tabStuBtn.onclick=()=>{ teacherPanel="students"; render(); };
@@ -2013,7 +2070,17 @@ function renderTeacherDash(){
     });
     document.querySelectorAll(".mark-box").forEach(inp=>{
       inp.oninput=(e)=>{
-        setMarkFor(r, e.target.dataset.roll, e.target.dataset.subject, e.target.value);
+        const maxM = Number(e.target.max);
+        const val = e.target.value.trim();
+        const valid = val==="" || (!isNaN(Number(val)) && Number(val)>=0 && Number(val)<=maxM);
+        if(!valid){
+          e.target.style.border = "2px solid var(--red)";
+          e.target.title = `Invalid — must be between 0 and ${maxM} (Out of ${maxM})`;
+          return; // don't save an out-of-range value
+        }
+        e.target.style.border = "";
+        e.target.title = "";
+        setMarkFor(r, e.target.dataset.roll, e.target.dataset.subject, val);
         if(!r.subjectEditors) r.subjectEditors = {};
         r.subjectEditors[e.target.dataset.subject] = t.name;
         saveDB();
@@ -2054,7 +2121,7 @@ function renderTeacherDash(){
         return best;
       });
       if(colToSubject.every(x=>!x)){ errEl.textContent="Could not match any header names to this class's subjects. Check spelling against the column headers above."; return; }
-      let matched=0, unmatchedRoll=[], unmatchedHeaders=[];
+      let matched=0, unmatchedRoll=[], unmatchedHeaders=[], outOfRange=[];
       headerCells.slice(1).forEach((h,i)=>{ if(!colToSubject[i]) unmatchedHeaders.push(h); });
       lines.slice(1).forEach(line=>{
         const parts = line.split(/\t|,/).map(p=>p.trim());
@@ -2068,6 +2135,12 @@ function renderTeacherDash(){
           const val = marks[i];
           if(val===undefined || val==="") return;
           if(val.toUpperCase()==="AB") return; // leave blank for absent
+          const subObj = r.subjects.find(s=>s.name===subName);
+          const maxM = subObj ? Number(subObj.maxMarks) : 100;
+          if(isNaN(Number(val)) || Number(val)<0 || Number(val)>maxM){
+            outOfRange.push(`${roll}/${subName}: "${val}" (out of ${maxM})`);
+            return;
+          }
           setMarkFor(r, stu.roll, subName, val);
         });
       });
@@ -2075,6 +2148,7 @@ function renderTeacherDash(){
       let msg = `Imported marks for ${matched} student(s), ${colToSubject.filter(Boolean).length} subject column(s) matched.`;
       if(unmatchedHeaders.length) msg += " Unmatched subject headers (skipped): "+unmatchedHeaders.join(", ")+".";
       if(unmatchedRoll.length) msg += " Unmatched roll numbers (skipped): "+unmatchedRoll.join(", ")+".";
+      if(outOfRange.length) msg += " Skipped invalid/out-of-range marks: "+outOfRange.join("; ")+".";
       okEl.textContent = msg;
       setTimeout(render, 1200);
     };
@@ -2154,6 +2228,8 @@ function renderTeacherLeavePanel(t, panelTabs){
   document.getElementById("tabStudents").onclick=()=>{ teacherPanel="students"; render(); };
   document.getElementById("tabSubjectMarks").onclick=()=>{ teacherPanel="subjectmarks"; render(); };
   document.getElementById("tabLeave").onclick=()=>{ teacherPanel="leave"; render(); };
+  const tabBlogBtn = document.getElementById("tabBlog"); if(tabBlogBtn) tabBlogBtn.onclick=()=>{ teacherPanel="blog"; render(); };
+  const tabGuidBtn = document.getElementById("tabGuidance"); if(tabGuidBtn) tabGuidBtn.onclick=()=>{ teacherPanel="guidance"; render(); };
   document.getElementById("tabAccount").onclick=()=>{ teacherPanel="account"; render(); };
   const tabAttBtn = document.getElementById("tabAttendance"); if(tabAttBtn) tabAttBtn.onclick=()=>{ teacherPanel="attendance"; render(); };
   const tabStuBtn = document.getElementById("tabStudents"); if(tabStuBtn) tabStuBtn.onclick=()=>{ teacherPanel="students"; render(); };
@@ -2179,6 +2255,112 @@ function renderTeacherLeavePanel(t, panelTabs){
 }
 
 /* ---------------- TEACHER: ACCOUNT / CHANGE PASSWORD PANEL ---------------- */
+/* ---------------- TEACHER: BLOG — any teacher can write a blog post, shown on the public Blog page ---------------- */
+function renderTeacherBlogPanel(t, panelTabs){
+  const mine = Object.values(DB.blogs).sort((a,b)=>b.id-a.id);
+  const rows = mine.map(p=>`
+    <tr><td>${p.title}</td><td>${p.author||"—"}</td><td>${p.addedOn}</td><td>${p.author===t.name?`<button class="btn btn-red btn-sm" data-delblog="${p.id}">Delete</button>`:""}</td></tr>`).join("");
+  app.innerHTML = `
+    <button class="back-link" id="back">&larr; Logout</button>
+    <div class="card">
+      ${teacherHeaderHtml(t, t.designation)}
+      ${panelTabs}
+      <h4 style="color:var(--navy);margin-bottom:6px;">Write a Blog Post</h4>
+      <p style="font-size:12px;color:var(--muted);margin-bottom:10px;">Visible to everyone on the public Blog page, along with your name.</p>
+      <label>Title</label>
+      <input id="blTitle" placeholder="Blog title">
+      <label>Content</label>
+      <p style="font-size:11.5px;color:var(--muted);margin:-4px 0 6px;">Tip: put <b>**text**</b> around any word/sentence to make it bold.</p>
+      <textarea id="blContent" rows="7" placeholder="Write your blog post here... use **word** to bold it"></textarea>
+      <div class="error" id="blErr"></div>
+      <div class="success" id="blOk"></div>
+      <button class="btn btn-primary" id="blSubmit">Publish Blog Post</button>
+
+      <h4 style="color:var(--navy);margin-top:24px;margin-bottom:10px;">All Published Posts</h4>
+      ${mine.length ? `<div class="scrollbox"><table><tr><th>Title</th><th>By</th><th>Date</th><th></th></tr>${rows}</table></div>` : `<p style="color:var(--muted);font-size:13px;">No posts published yet.</p>`}
+    </div>
+  `;
+  document.getElementById("back").onclick=()=>{session=null;go("home");};
+  document.getElementById("tabBlog").onclick=()=>{ teacherPanel="blog"; render(); };
+  const tabGuid = document.getElementById("tabGuidance"); if(tabGuid) tabGuid.onclick=()=>{ teacherPanel="guidance"; render(); };
+  const tabMk = document.getElementById("tabMarks"); if(tabMk) tabMk.onclick=()=>{ teacherPanel="marks"; render(); };
+  document.getElementById("tabSubjectMarks").onclick=()=>{ teacherPanel="subjectmarks"; render(); };
+  document.getElementById("tabStudents").onclick=()=>{ teacherPanel="students"; render(); };
+  const tabAtt = document.getElementById("tabAttendance"); if(tabAtt) tabAtt.onclick=()=>{ teacherPanel="attendance"; render(); };
+  document.getElementById("tabLeave").onclick=()=>{ teacherPanel="leave"; render(); };
+  document.getElementById("tabAccount").onclick=()=>{ teacherPanel="account"; render(); };
+
+  document.getElementById("blSubmit").onclick=()=>{
+    const title = document.getElementById("blTitle").value.trim();
+    const content = document.getElementById("blContent").value.trim();
+    const errEl = document.getElementById("blErr"); errEl.textContent="";
+    if(!title){ errEl.textContent="Please enter a title."; return; }
+    if(!content){ errEl.textContent="Please write some content."; return; }
+    DB.blogCounter = (DB.blogCounter||0) + 1;
+    const id = DB.blogCounter;
+    DB.blogs[id] = { id, title, content, addedOn: nowStr(), author: t.name };
+    saveDB();
+    document.getElementById("blOk").textContent="Published.";
+    setTimeout(render, 600);
+  };
+  document.querySelectorAll("[data-delblog]").forEach(btn=>{
+    btn.onclick=()=>{ deleteFromDB("blogs", btn.dataset.delblog); saveDB(); render(); };
+  });
+}
+
+/* ---------------- TEACHER: CAREER GUIDANCE — subject-related guidance, shown on the public page ---------------- */
+function renderTeacherCareerGuidePanel(t, panelTabs){
+  const mine = Object.values(DB.careerGuides).sort((a,b)=>b.id-a.id);
+  const rows = mine.map(p=>`
+    <tr><td>${p.title}</td><td>${p.author||"—"}</td><td>${p.addedOn}</td><td>${p.author===t.name?`<button class="btn btn-red btn-sm" data-delguide="${p.id}">Delete</button>`:""}</td></tr>`).join("");
+  app.innerHTML = `
+    <button class="back-link" id="back">&larr; Logout</button>
+    <div class="card">
+      ${teacherHeaderHtml(t, t.designation)}
+      ${panelTabs}
+      <h4 style="color:var(--navy);margin-bottom:6px;">Add Career Guidance Content</h4>
+      <p style="font-size:12px;color:var(--muted);margin-bottom:10px;">Visible to everyone on the public Career Guidance page — great for subject-related career advice for students.</p>
+      <label>Title</label>
+      <input id="cgTitle" placeholder="e.g. Careers after studying Science">
+      <label>Content</label>
+      <p style="font-size:11.5px;color:var(--muted);margin:-4px 0 6px;">Tip: put <b>**text**</b> around any word/sentence to make it bold.</p>
+      <textarea id="cgContent" rows="7" placeholder="Write the guidance content here... use **word** to bold it"></textarea>
+      <div class="error" id="cgErr"></div>
+      <div class="success" id="cgOk"></div>
+      <button class="btn btn-primary" id="cgSubmit">Publish</button>
+
+      <h4 style="color:var(--navy);margin-top:24px;margin-bottom:10px;">All Published Guidance</h4>
+      ${mine.length ? `<div class="scrollbox"><table><tr><th>Title</th><th>By</th><th>Date</th><th></th></tr>${rows}</table></div>` : `<p style="color:var(--muted);font-size:13px;">Nothing published yet.</p>`}
+    </div>
+  `;
+  document.getElementById("back").onclick=()=>{session=null;go("home");};
+  document.getElementById("tabGuidance").onclick=()=>{ teacherPanel="guidance"; render(); };
+  const tabBlog = document.getElementById("tabBlog"); if(tabBlog) tabBlog.onclick=()=>{ teacherPanel="blog"; render(); };
+  const tabMk = document.getElementById("tabMarks"); if(tabMk) tabMk.onclick=()=>{ teacherPanel="marks"; render(); };
+  document.getElementById("tabSubjectMarks").onclick=()=>{ teacherPanel="subjectmarks"; render(); };
+  document.getElementById("tabStudents").onclick=()=>{ teacherPanel="students"; render(); };
+  const tabAtt = document.getElementById("tabAttendance"); if(tabAtt) tabAtt.onclick=()=>{ teacherPanel="attendance"; render(); };
+  document.getElementById("tabLeave").onclick=()=>{ teacherPanel="leave"; render(); };
+  document.getElementById("tabAccount").onclick=()=>{ teacherPanel="account"; render(); };
+
+  document.getElementById("cgSubmit").onclick=()=>{
+    const title = document.getElementById("cgTitle").value.trim();
+    const content = document.getElementById("cgContent").value.trim();
+    const errEl = document.getElementById("cgErr"); errEl.textContent="";
+    if(!title){ errEl.textContent="Please enter a title."; return; }
+    if(!content){ errEl.textContent="Please write some content."; return; }
+    DB.careerGuideCounter = (DB.careerGuideCounter||0) + 1;
+    const id = DB.careerGuideCounter;
+    DB.careerGuides[id] = { id, title, content, addedOn: nowStr(), author: t.name };
+    saveDB();
+    document.getElementById("cgOk").textContent="Published.";
+    setTimeout(render, 600);
+  };
+  document.querySelectorAll("[data-delguide]").forEach(btn=>{
+    btn.onclick=()=>{ deleteFromDB("careerGuides", btn.dataset.delguide); saveDB(); render(); };
+  });
+}
+
 function renderTeacherAccountPanel(t, panelTabs){
   app.innerHTML = `
     <button class="back-link" id="back">&larr; Logout</button>
@@ -2204,6 +2386,8 @@ function renderTeacherAccountPanel(t, panelTabs){
   document.getElementById("tabStudents").onclick=()=>{ teacherPanel="students"; render(); };
   document.getElementById("tabSubjectMarks").onclick=()=>{ teacherPanel="subjectmarks"; render(); };
   document.getElementById("tabLeave").onclick=()=>{ teacherPanel="leave"; render(); };
+  const tabBlogBtn = document.getElementById("tabBlog"); if(tabBlogBtn) tabBlogBtn.onclick=()=>{ teacherPanel="blog"; render(); };
+  const tabGuidBtn = document.getElementById("tabGuidance"); if(tabGuidBtn) tabGuidBtn.onclick=()=>{ teacherPanel="guidance"; render(); };
   document.getElementById("tabAccount").onclick=()=>{ teacherPanel="account"; render(); };
   const tabAttBtn = document.getElementById("tabAttendance"); if(tabAttBtn) tabAttBtn.onclick=()=>{ teacherPanel="attendance"; render(); };
   const tabStuBtn = document.getElementById("tabStudents"); if(tabStuBtn) tabStuBtn.onclick=()=>{ teacherPanel="students"; render(); };
@@ -2393,7 +2577,7 @@ function renderTeacherSubjectMarksPanel(t, panelTabs){
     const rows = roster.map(s=>`
       <tr>
         <td>${s.roll}</td><td>${s.name}</td>
-        <td><input class="subjmark-box" data-roll="${s.roll}" type="number" style="width:70px;" value="${markFor(rr,s.roll,subjMarksSubject)}" ${locked||notHeld?"disabled":""}></td>
+        <td><input class="subjmark-box" data-roll="${s.roll}" type="number" min="0" max="${subjObj?subjObj.maxMarks:100}" style="width:70px;" value="${markFor(rr,s.roll,subjMarksSubject)}" ${locked||notHeld?"disabled":""}></td>
       </tr>`).join("");
     tableHtml = `
       <div class="locked-note" style="margin-top:14px;">
@@ -2435,6 +2619,8 @@ function renderTeacherSubjectMarksPanel(t, panelTabs){
   document.getElementById("tabStudents").onclick=()=>{ teacherPanel="students"; render(); };
   const tabAtt = document.getElementById("tabAttendance"); if(tabAtt) tabAtt.onclick=()=>{ teacherPanel="attendance"; render(); };
   document.getElementById("tabLeave").onclick=()=>{ teacherPanel="leave"; render(); };
+  const tabBlogBtn = document.getElementById("tabBlog"); if(tabBlogBtn) tabBlogBtn.onclick=()=>{ teacherPanel="blog"; render(); };
+  const tabGuidBtn = document.getElementById("tabGuidance"); if(tabGuidBtn) tabGuidBtn.onclick=()=>{ teacherPanel="guidance"; render(); };
   document.getElementById("tabAccount").onclick=()=>{ teacherPanel="account"; render(); };
 
   document.getElementById("subjSelClass").onchange=(e)=>{ subjMarksClass=e.target.value||null; subjMarksExam=null; subjMarksSubject=null; render(); };
@@ -2445,7 +2631,17 @@ function renderTeacherSubjectMarksPanel(t, panelTabs){
 
   document.querySelectorAll(".subjmark-box").forEach(inp=>{
     inp.oninput=(e)=>{
-      setMarkFor(rr, e.target.dataset.roll, subjMarksSubject, e.target.value);
+      const maxM = Number(e.target.max);
+      const val = e.target.value.trim();
+      const valid = val==="" || (!isNaN(Number(val)) && Number(val)>=0 && Number(val)<=maxM);
+      if(!valid){
+        e.target.style.border = "2px solid var(--red)";
+        e.target.title = `Invalid — must be between 0 and ${maxM} (Out of ${maxM})`;
+        return;
+      }
+      e.target.style.border = "";
+      e.target.title = "";
+      setMarkFor(rr, e.target.dataset.roll, subjMarksSubject, val);
       if(!rr.subjectEditors) rr.subjectEditors = {};
       rr.subjectEditors[subjMarksSubject] = t.name;
       saveDB();
@@ -2529,6 +2725,8 @@ function renderTeacherAttendancePanel(t, panelTabs, classKey, isAssociate){
   document.getElementById("tabStudents").onclick=()=>{ teacherPanel="students"; render(); };
   document.getElementById("tabSubjectMarks").onclick=()=>{ teacherPanel="subjectmarks"; render(); };
   document.getElementById("tabLeave").onclick=()=>{ teacherPanel="leave"; render(); };
+  const tabBlogBtn = document.getElementById("tabBlog"); if(tabBlogBtn) tabBlogBtn.onclick=()=>{ teacherPanel="blog"; render(); };
+  const tabGuidBtn = document.getElementById("tabGuidance"); if(tabGuidBtn) tabGuidBtn.onclick=()=>{ teacherPanel="guidance"; render(); };
   document.getElementById("tabAccount").onclick=()=>{ teacherPanel="account"; render(); };
   document.getElementById("tabAttendance").onclick=()=>{ teacherPanel="attendance"; render(); };
 
@@ -2557,6 +2755,7 @@ function renderTeacherStudentsPanel(t, panelTabs, classKey, isAssociate){
 
   let bodyHtml;
   if(unlocked){
+    const cls = classKey.split("-")[0], section = classKey.split("-")[1];
     const rows = roster.map(s=>`
       <tr>
         <td>${s.roll}</td>
@@ -2572,12 +2771,35 @@ function renderTeacherStudentsPanel(t, panelTabs, classKey, isAssociate){
               <option value="M" ${s.gender==='M'?"selected":""}>Boy</option>
               <option value="F" ${s.gender==='F'?"selected":""}>Girl</option>
             </select></td>
+        <td><button class="btn btn-red btn-sm" data-removestu="${s.roll}" data-name="${s.name}" type="button">Remove</button></td>
       </tr>`).join("");
     bodyHtml = `
-      <div class="success">✅ Admin has unlocked editing for ${classLabel(classKey)}. Make your changes below, then click Submit — this locks again right after, so ask Admin again next time you need to fix something.</div>
-      ${roster.length ? `<div class="scrollbox" style="margin-top:10px;"><table><tr><th>Roll</th><th>Name</th><th>Mobile</th><th>DOB</th><th>House</th><th>Gender</th></tr>${rows}</table></div>` : `<p style="color:var(--muted);font-size:13px;">No students found for ${classLabel(classKey)}.</p>`}
+      <div class="success">✅ Admin has unlocked editing for ${classLabel(classKey)}. You can also add a new student or remove one below — everything locks again once you click Submit.</div>
+      ${roster.length ? `<div class="scrollbox" style="margin-top:10px;"><table><tr><th>Roll</th><th>Name</th><th>Mobile</th><th>DOB</th><th>House</th><th>Gender</th><th></th></tr>${rows}</table></div>` : `<p style="color:var(--muted);font-size:13px;">No students found for ${classLabel(classKey)}.</p>`}
       <div class="error" id="editStuErr" style="margin-top:8px;"></div>
       <button class="btn btn-primary" id="submitStuEdits" style="margin-top:10px;">Submit Changes</button>
+
+      <h4 style="color:var(--navy);margin-top:24px;margin-bottom:10px;">Add a New Student to ${classLabel(classKey)}</h4>
+      <label>Name</label>
+      <input id="newStuName" placeholder="Student's full name">
+      <label>Mobile Number</label>
+      <input id="newStuMobile" placeholder="Parent/Guardian mobile number">
+      <label>Date of Birth</label>
+      <input id="newStuDob" type="date">
+      <label>House (optional)</label>
+      <select id="newStuHouse">
+        <option value="" selected>— Not set —</option>
+        ${HOUSE_NAMES.map(h=>`<option value="${h}">${h}</option>`).join("")}
+      </select>
+      <label>Gender (optional)</label>
+      <select id="newStuGender">
+        <option value="" selected>— Not set —</option>
+        <option value="M">Boy</option>
+        <option value="F">Girl</option>
+      </select>
+      <div class="error" id="addStuErr"></div>
+      <div class="success" id="addStuOk"></div>
+      <button class="btn btn-primary" id="addStuBtn" style="margin-top:6px;">+ Add Student</button>
     `;
   } else {
     const rows = roster.map(s=>`
@@ -2619,6 +2841,8 @@ function renderTeacherStudentsPanel(t, panelTabs, classKey, isAssociate){
   document.getElementById("tabStudents").onclick=()=>{ teacherPanel="students"; render(); };
   document.getElementById("tabSubjectMarks").onclick=()=>{ teacherPanel="subjectmarks"; render(); };
   document.getElementById("tabLeave").onclick=()=>{ teacherPanel="leave"; render(); };
+  const tabBlogBtn = document.getElementById("tabBlog"); if(tabBlogBtn) tabBlogBtn.onclick=()=>{ teacherPanel="blog"; render(); };
+  const tabGuidBtn = document.getElementById("tabGuidance"); if(tabGuidBtn) tabGuidBtn.onclick=()=>{ teacherPanel="guidance"; render(); };
   document.getElementById("tabAccount").onclick=()=>{ teacherPanel="account"; render(); };
   const tabAttBtn = document.getElementById("tabAttendance"); if(tabAttBtn) tabAttBtn.onclick=()=>{ teacherPanel="attendance"; render(); };
 
@@ -2678,6 +2902,33 @@ function renderTeacherStudentsPanel(t, panelTabs, classKey, isAssociate){
     if(persistStudents()){
       saveDB();
       render();
+    }
+  };
+
+  document.querySelectorAll("[data-removestu]").forEach(btn=>{
+    btn.onclick=()=>{
+      if(!confirm(`Remove ${btn.dataset.name} (Roll ${btn.dataset.removestu}) from ${classLabel(classKey)}? This cannot be undone from here.`)) return;
+      STUDENTS = STUDENTS.filter(s=>s.roll!==btn.dataset.removestu);
+      persistStudents();
+      render();
+    };
+  });
+
+  const addStuBtn = document.getElementById("addStuBtn");
+  if(addStuBtn) addStuBtn.onclick=()=>{
+    const cls = classKey.split("-")[0], section = classKey.split("-")[1];
+    const name = document.getElementById("newStuName").value.trim();
+    const mobile = document.getElementById("newStuMobile").value.trim();
+    const dob = document.getElementById("newStuDob").value;
+    const house = document.getElementById("newStuHouse").value;
+    const gender = document.getElementById("newStuGender").value;
+    const errEl = document.getElementById("addStuErr"); errEl.textContent="";
+    if(!name){ errEl.textContent="Please enter the student's name."; return; }
+    const roll = nextRollFor(cls, section);
+    STUDENTS.push({ roll, name, cls, section, dob, mobile, house, gender, admno:"", photo:"", password: nextStudentPassword(name) });
+    if(persistStudents()){
+      document.getElementById("addStuOk").textContent = `${name} added with Roll No ${roll}.`;
+      setTimeout(render, 700);
     }
   };
 }
@@ -2949,7 +3200,7 @@ function renderLibrarianPanel(){
       if(!content){ errEl.textContent="Please write some content."; return; }
       DB.blogCounter = (DB.blogCounter||0) + 1;
       const id = DB.blogCounter;
-      DB.blogs[id] = { id, title, content, addedOn: nowStr() };
+      DB.blogs[id] = { id, title, content, addedOn: nowStr(), author: actor.name };
       saveDB();
       document.getElementById("blOk").textContent="Published.";
       setTimeout(render, 600);
@@ -2994,7 +3245,7 @@ function renderLibrarianPanel(){
       if(!content){ errEl.textContent="Please write some content."; return; }
       DB.careerGuideCounter = (DB.careerGuideCounter||0) + 1;
       const id = DB.careerGuideCounter;
-      DB.careerGuides[id] = { id, title, content, addedOn: nowStr() };
+      DB.careerGuides[id] = { id, title, content, addedOn: nowStr(), author: actor.name };
       saveDB();
       document.getElementById("cgOk").textContent="Published.";
       setTimeout(render, 600);
@@ -3230,6 +3481,8 @@ function renderPrincipalDash(){
       ${isAdmin ? `<button class="btn ${principalPanel==='settings'?'btn-primary':'btn-outline'} btn-sm" id="pTabSettings" style="margin-right:8px;">⚙️ Site Settings</button>` : ""}
       ${isAdmin ? `<button class="btn ${principalPanel==='facphotos'?'btn-primary':'btn-outline'} btn-sm" id="pTabFacPhotos" style="margin-right:8px;">🏫 Facility Photos</button>` : ""}
       ${isAdmin ? `<button class="btn ${principalPanel==='subjects'?'btn-primary':'btn-outline'} btn-sm" id="pTabSubjects" style="margin-right:8px;">📚 Subjects</button>` : ""}
+      ${isAdmin ? `<button class="btn ${principalPanel==='promote'?'btn-primary':'btn-outline'} btn-sm" id="pTabPromote" style="margin-right:8px;">🎓 Promote Students</button>` : ""}
+      ${isAdmin ? `<button class="btn ${principalPanel==='sessionhistory'?'btn-primary':'btn-outline'} btn-sm" id="pTabSessionHistory" style="margin-right:8px;">📚 Session History</button>` : ""}
       <button class="btn ${principalPanel==='account'?'btn-primary':'btn-outline'} btn-sm" id="pTabAccount">🔑 Change / Forgot Password</button>
     </div>`;
 
@@ -3275,6 +3528,14 @@ function renderPrincipalDash(){
   }
   if(principalPanel === "subjects" && isAdmin){
     renderAdminSubjectsPanel(panelTabs);
+    return;
+  }
+  if(principalPanel === "promote" && isAdmin){
+    renderAdminPromotePanel(panelTabs);
+    return;
+  }
+  if(principalPanel === "sessionhistory" && isAdmin){
+    renderAdminSessionHistoryPanel(panelTabs);
     return;
   }
   if(principalPanel === "account"){
@@ -4416,6 +4677,16 @@ function renderAdminSettingsPanel(panelTabs){
       <div class="success" id="scOk"></div>
       <button class="btn btn-primary" id="scSave">Save Contact Details</button>
 
+      <h4 style="color:var(--navy);margin-top:24px;margin-bottom:6px;">Academic Session</h4>
+      <p style="font-size:12px;color:var(--muted);margin-bottom:10px;">
+        This is shown wherever the site displays the current session (e.g. "Session 2026-27"). Change it once a year, after promoting students — see the "🎓 Promote Students" and "📚 Session History" tabs.
+      </p>
+      <label>Current Session</label>
+      <input id="sessionInput" value="${currentSession()}" placeholder="e.g. 2026-27">
+      <div class="error" id="sessionErr"></div>
+      <div class="success" id="sessionOk"></div>
+      <button class="btn btn-primary" id="sessionSave">Save Session</button>
+
       <h4 style="color:var(--navy);margin-top:24px;margin-bottom:6px;">Social Media Links</h4>
       <p style="font-size:12px;color:var(--muted);margin-bottom:10px;">
         Fill in a link and its icon appears in the site footer, linking straight to that app/page. Leave it blank to hide that icon — only platforms with a link show up.
@@ -4439,6 +4710,16 @@ function renderAdminSettingsPanel(panelTabs){
   `;
   document.getElementById("back").onclick=()=>{session=null;go("home");};
   wirePrincipalTabs();
+
+  document.getElementById("sessionSave").onclick=()=>{
+    const val = document.getElementById("sessionInput").value.trim();
+    const errEl = document.getElementById("sessionErr"); errEl.textContent="";
+    if(!val){ errEl.textContent="Session cannot be empty."; return; }
+    DB.currentSession = val;
+    saveDB();
+    document.getElementById("sessionOk").textContent = "Session updated to "+val+".";
+    setTimeout(render, 700);
+  };
 
   document.getElementById("socialSave").onclick=()=>{
     const errEl = document.getElementById("socialErr"); errEl.textContent="";
@@ -4661,6 +4942,164 @@ function renderAdminSubjectsPanel(panelTabs){
     deleteFromDB("subjectsByClass", adminSubjectsSelectedClass);
     saveDB();
     render();
+  };
+}
+
+/* ---------------- ADMIN — Promote / Pass Out Students at year-end ---------------- */
+let promoteSelectedClass = null;
+function renderAdminPromotePanel(panelTabs){
+  const classOptions = CLASS_LIST.map(c=>`<option value="${c.key}" ${promoteSelectedClass===c.key?"selected":""}>${c.label}</option>`).join("");
+  let detailHtml = "";
+  if(promoteSelectedClass){
+    const roster = studentsForClass(promoteSelectedClass);
+    const clsNum = classNumber(promoteSelectedClass);
+    const isTwelfth = clsNum === "12";
+    const rows = roster.map(s=>`
+      <tr>
+        <td><input type="checkbox" class="promote-check" value="${s.roll}"></td>
+        <td>${s.roll}</td><td>${s.name}</td>
+      </tr>`).join("");
+    detailHtml = `
+      <div class="card">
+        <div class="locked-note">
+          ${isTwelfth
+            ? `Class 12 students can't be "promoted" further — select who has passed out and click <b>Mark as Passed Out</b>. Their records move to the Alumni list (kept for future reference) and they're removed from the active school list.`
+            : `Selected students move to <b>Class ${Number(clsNum)+1}</b>, same section, keeping the same roll number except the class digit (e.g. ${clsNum}${promoteSelectedClass.split("-")[1]}05 → ${Number(clsNum)+1}${promoteSelectedClass.split("-")[1]}05).`}
+          Before promoting a class, make sure this session's roster is archived from the "📚 Session History" tab.
+        </div>
+        <p style="margin:10px 0;">
+          <button class="btn btn-outline btn-sm" id="selectAllPromote" type="button">Select All</button>
+          <button class="btn btn-outline btn-sm" id="deselectAllPromote" type="button">Deselect All</button>
+        </p>
+        ${roster.length ? `<div class="scrollbox"><table><tr><th></th><th>Roll</th><th>Name</th></tr>${rows}</table></div>` : `<p style="color:var(--muted);font-size:13px;">No students in this class.</p>`}
+        <div class="error" id="promoteErr" style="margin-top:10px;"></div>
+        <div class="success" id="promoteOk"></div>
+        ${isTwelfth
+          ? `<button class="btn btn-red" id="passOutBtn" style="margin-top:10px;">Mark Selected as Passed Out (TC)</button>`
+          : `<button class="btn btn-primary" id="promoteBtn" style="margin-top:10px;">Promote Selected to Class ${Number(clsNum)+1}</button>`}
+      </div>`;
+  }
+
+  app.innerHTML = `
+    <button class="back-link" id="back">&larr; Logout</button>
+    <div class="card">
+      <h2 style="color:var(--navy)">Welcome, ${currentActor().name}</h2>
+      <p style="color:var(--muted);font-size:13px;">${currentActor().designation}</p>
+      ${panelTabs}
+      <p style="font-size:12px;color:var(--muted);margin-bottom:10px;">At year-end, pick a class to promote its students, or mark Class 12 students as passed out.</p>
+      <label>Class</label>
+      <select id="promoteClassSel"><option value="">— Select class —</option>${classOptions}</select>
+    </div>
+    ${detailHtml}
+  `;
+  document.getElementById("back").onclick=()=>{session=null;go("home");};
+  wirePrincipalTabs();
+
+  document.getElementById("promoteClassSel").onchange=(e)=>{ promoteSelectedClass = e.target.value||null; render(); };
+
+  const selAll = document.getElementById("selectAllPromote");
+  if(selAll) selAll.onclick=()=>{ document.querySelectorAll(".promote-check").forEach(c=>c.checked=true); };
+  const deselAll = document.getElementById("deselectAllPromote");
+  if(deselAll) deselAll.onclick=()=>{ document.querySelectorAll(".promote-check").forEach(c=>c.checked=false); };
+
+  const promoteBtn = document.getElementById("promoteBtn");
+  if(promoteBtn) promoteBtn.onclick=()=>{
+    const selected = Array.from(document.querySelectorAll(".promote-check:checked")).map(c=>c.value);
+    const errEl = document.getElementById("promoteErr"); errEl.textContent="";
+    if(!selected.length){ errEl.textContent="Select at least one student first."; return; }
+    if(!confirm(`Promote ${selected.length} student(s) from ${classLabel(promoteSelectedClass)} to Class ${Number(classNumber(promoteSelectedClass))+1}? This changes their class and roll number.`)) return;
+    const { promoted, errors } = promoteStudents(promoteSelectedClass, selected);
+    persistStudents();
+    let msg = `${promoted} student(s) promoted successfully.`;
+    if(errors.length) msg += ` ${errors.length} skipped due to a roll clash: ` + errors.join("; ");
+    document.getElementById("promoteOk").textContent = msg;
+    setTimeout(render, 1200);
+  };
+
+  const passOutBtn = document.getElementById("passOutBtn");
+  if(passOutBtn) passOutBtn.onclick=()=>{
+    const selected = Array.from(document.querySelectorAll(".promote-check:checked")).map(c=>c.value);
+    const errEl = document.getElementById("promoteErr"); errEl.textContent="";
+    if(!selected.length){ errEl.textContent="Select at least one student first."; return; }
+    if(!confirm(`Mark ${selected.length} student(s) as passed out (TC)? They'll be removed from the active class list and moved to Alumni under session ${currentSession()}.`)) return;
+    const count = passOutStudents(promoteSelectedClass, selected, currentSession());
+    persistStudents();
+    saveDB();
+    document.getElementById("promoteOk").textContent = `${count} student(s) marked as passed out and moved to Alumni.`;
+    setTimeout(render, 1200);
+  };
+}
+
+/* ---------------- ADMIN — Session History: archive rosters year to year, view Alumni ---------------- */
+let sessionHistorySelected = null;
+function renderAdminSessionHistoryPanel(panelTabs){
+  const archivedSessions = Object.keys(DB.sessionArchives||{}).sort().reverse();
+  const alumniSessions = Object.keys(DB.alumniStudents||{}).sort().reverse();
+  const alreadyArchivedThisSession = !!(DB.sessionArchives && DB.sessionArchives[currentSession()]);
+
+  let detailHtml = "";
+  if(sessionHistorySelected){
+    const [kind, sessionKey] = sessionHistorySelected.split("::");
+    const list = kind==="archive" ? (DB.sessionArchives[sessionKey]||[]) : (DB.alumniStudents[sessionKey]||[]);
+    const sorted = [...list].sort((a,b)=> (a.cls+a.section+a.roll).localeCompare(b.cls+b.section+b.roll, undefined, {numeric:true}));
+    const rows = sorted.map(s=>`<tr><td>${s.roll}</td><td>${s.name}</td><td>${classLabel(s.cls+"-"+s.section)}</td><td>${s.mobile||"—"}</td><td>${s.dob||"—"}</td></tr>`).join("");
+    detailHtml = `
+      <div class="card">
+        <h4 style="color:var(--navy);margin-bottom:10px;">${kind==="archive"?"Roster":"Alumni"} — Session ${sessionKey} (${list.length} students)</h4>
+        <button class="btn btn-outline btn-sm" id="downloadSessionExcel" style="margin-bottom:10px;">⬇ Download as Excel</button>
+        <div class="scrollbox"><table><tr><th>Roll</th><th>Name</th><th>Class</th><th>Mobile</th><th>DOB</th></tr>${rows}</table></div>
+      </div>`;
+  }
+
+  app.innerHTML = `
+    <button class="back-link" id="back">&larr; Logout</button>
+    <div class="card">
+      <h2 style="color:var(--navy)">Welcome, ${currentActor().name}</h2>
+      <p style="color:var(--muted);font-size:13px;">${currentActor().designation}</p>
+      ${panelTabs}
+      <div class="locked-note">
+        Current session: <b>${currentSession()}</b> (change it in Site Settings). Archive this session's full roster <b>before</b> promoting students, so there's a permanent record of who was in which class this year.
+      </div>
+      <button class="btn ${alreadyArchivedThisSession?'btn-outline':'btn-primary'}" id="archiveNowBtn" style="margin-top:10px;">📸 ${alreadyArchivedThisSession?'Re-archive':'Archive'} Current Roster as ${currentSession()}</button>
+      <div class="success" id="archiveOk" style="margin-top:8px;"></div>
+
+      <h4 style="color:var(--navy);margin-top:24px;margin-bottom:10px;">Archived Rosters (${archivedSessions.length})</h4>
+      ${archivedSessions.length ? archivedSessions.map(s=>`<button class="btn btn-outline btn-sm" data-viewsession="archive::${s}" style="margin:0 6px 6px 0;">${s} (${DB.sessionArchives[s].length})</button>`).join("") : `<p style="color:var(--muted);font-size:13px;">No sessions archived yet.</p>`}
+
+      <h4 style="color:var(--navy);margin-top:24px;margin-bottom:10px;">Alumni — Passed Out Students (${alumniSessions.length} session(s))</h4>
+      ${alumniSessions.length ? alumniSessions.map(s=>`<button class="btn btn-outline btn-sm" data-viewsession="alumni::${s}" style="margin:0 6px 6px 0;">${s} (${DB.alumniStudents[s].length})</button>`).join("") : `<p style="color:var(--muted);font-size:13px;">No students marked as passed out yet.</p>`}
+    </div>
+    ${detailHtml}
+  `;
+  document.getElementById("back").onclick=()=>{session=null;go("home");};
+  wirePrincipalTabs();
+
+  document.getElementById("archiveNowBtn").onclick=()=>{
+    if(alreadyArchivedThisSession && !confirm(`Session ${currentSession()} was already archived. Re-archive with the CURRENT roster (overwriting the old snapshot)?`)) return;
+    archiveCurrentSessionRoster();
+    saveDB();
+    document.getElementById("archiveOk").textContent = `Archived ${STUDENTS.length} students under session ${currentSession()}.`;
+    setTimeout(render, 900);
+  };
+
+  document.querySelectorAll("[data-viewsession]").forEach(btn=>{
+    btn.onclick=()=>{ sessionHistorySelected = btn.dataset.viewsession; render(); };
+  });
+
+  const dlBtn = document.getElementById("downloadSessionExcel");
+  if(dlBtn) dlBtn.onclick=()=>{
+    const [kind, sessionKey] = sessionHistorySelected.split("::");
+    const list = kind==="archive" ? (DB.sessionArchives[sessionKey]||[]) : (DB.alumniStudents[sessionKey]||[]);
+    const sorted = [...list].sort((a,b)=> (a.cls+a.section+a.roll).localeCompare(b.cls+b.section+b.roll, undefined, {numeric:true}));
+    const title = `${kind==="archive"?"ROSTER":"ALUMNI"} — SESSION ${sessionKey}`;
+    const headerRow = ["Roll No","Name","Class","Mobile","DOB","House"];
+    const dataRows = sorted.map(s=>[s.roll, s.name, classLabel(s.cls+"-"+s.section), s.mobile||"", s.dob||"", s.house||""]);
+    const aoa = [[title], [], headerRow, ...dataRows];
+    const ws = XLSX.utils.aoa_to_sheet(aoa);
+    ws['!merges'] = [{ s:{r:0,c:0}, e:{r:0,c:headerRow.length-1} }];
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, sessionKey.replace(/[^A-Za-z0-9]/g,"").slice(0,28) || "Session");
+    XLSX.writeFile(wb, `${kind==="archive"?"Roster":"Alumni"}_${sessionKey.replace(/\s+/g,"_")}.xlsx`);
   };
 }
 
