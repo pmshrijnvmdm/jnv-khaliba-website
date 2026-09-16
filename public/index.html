@@ -4659,9 +4659,33 @@ function renderStudentLogin(){
 }
 
 /* ---------------- STUDENT DASHBOARD ---------------- */
+let studentPanel = "main";
 function renderStudentDash(){
   const stu = session.stu;
   const classKey = stu.cls+"-"+stu.section;
+
+  const panelTabs = `
+    <div style="margin-bottom:16px;">
+      <button class="btn ${studentPanel==='main'?'btn-primary':'btn-outline'} btn-sm" id="stuTabMain" style="margin-right:8px;">📊 My Results &amp; Attendance</button>
+      <button class="btn ${studentPanel==='account'?'btn-primary':'btn-outline'} btn-sm" id="stuTabAccount">🔑 Change Password</button>
+    </div>`;
+
+  if(studentPanel === "account"){
+    app.innerHTML = `
+      <button class="back-link" id="back">&larr; Logout</button>
+      <div class="card">
+        <h2 style="color:var(--navy)">Welcome, ${stu.name}</h2>
+        <p style="color:var(--muted);font-size:13px;">Roll No ${stu.roll} · ${classLabel(classKey)} · ${stu.house?("House: "+stu.house):""}</p>
+        ${panelTabs}
+        ${changePasswordBlock("student", stu.roll, stu.password)}
+      </div>
+    `;
+    document.getElementById("back").onclick=()=>{session=null;go("home");};
+    document.getElementById("stuTabMain").onclick=()=>{ studentPanel="main"; render(); };
+    document.getElementById("stuTabAccount").onclick=()=>{ studentPanel="account"; render(); };
+    wireChangePassword("student", stu.roll, stu.password);
+    return;
+  }
 
   const examBlocks = EXAMS.map(e=>{
     const k = resultKey(classKey, e.key);
@@ -4714,13 +4738,14 @@ function renderStudentDash(){
     <div class="card">
       <h2 style="color:var(--navy)">Welcome, ${stu.name}</h2>
       <p style="color:var(--muted);font-size:13px;">Roll No ${stu.roll} · ${classLabel(classKey)} · ${stu.house?("House: "+stu.house):""}</p>
+      ${panelTabs}
     </div>
     ${attendanceCard}
     ${body}
-    <div class="card">${changePasswordBlock("student", stu.roll, stu.password)}</div>
   `;
   document.getElementById("back").onclick=()=>{session=null;go("home");};
-  wireChangePassword("student", stu.roll, stu.password);
+  document.getElementById("stuTabMain").onclick=()=>{ studentPanel="main"; render(); };
+  document.getElementById("stuTabAccount").onclick=()=>{ studentPanel="account"; render(); };
 }
 
 /* ---------------- CHANGE PASSWORD (shared) ---------------- */
