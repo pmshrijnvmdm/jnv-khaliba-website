@@ -2588,15 +2588,21 @@ function renderTeacherStudentsPanel(t, panelTabs, classKey, isAssociate){
         <td>${s.dob||'<span style="color:var(--red);">Missing</span>'}</td>
         <td>${s.house||"—"}</td>
         <td>${s.admno||"—"}</td>
+        <td>
+          <span class="pw-reveal-text" data-roll="${s.roll}" style="font-family:monospace;">••••••••</span>
+          <button type="button" class="pw-reveal-btn" data-roll="${s.roll}" style="background:none;border:none;cursor:pointer;font-size:14px;">👁</button>
+          <button type="button" class="pw-reset-stu-btn" data-roll="${s.roll}" data-name="${s.name}" style="background:none;border:none;cursor:pointer;font-size:14px;" title="Set new password">🔑</button>
+        </td>
       </tr>`).join("");
     bodyHtml = `
       <div class="locked-note">
         This is a <b>view-only</b> list. If a mobile number, DOB, house, or spelling needs fixing,
         ${requested ? `you've already asked — <b>waiting for Admin to unlock editing</b> for ${classLabel(classKey)}.` :
           `click below to ask Admin for permission to edit ${classLabel(classKey)}'s students directly.`}
+        Tap 👁 next to a student to see their current password, in case a parent needs to be told.
       </div>
       ${!requested ? `<button class="btn btn-outline" id="requestEditBtn" style="margin-top:10px;">Request Edit Permission for ${classLabel(classKey)}</button>` : ""}
-      ${roster.length ? `<div class="scrollbox" style="margin-top:14px;"><table><tr><th>Roll</th><th>Name</th><th>Mobile</th><th>DOB</th><th>House</th><th>Admission No.</th></tr>${rows}</table></div>` : `<p style="color:var(--muted);font-size:13px;">No students found for ${classLabel(classKey)}.</p>`}
+      ${roster.length ? `<div class="scrollbox" style="margin-top:14px;"><table><tr><th>Roll</th><th>Name</th><th>Mobile</th><th>DOB</th><th>House</th><th>Admission No.</th><th>Password</th></tr>${rows}</table></div>` : `<p style="color:var(--muted);font-size:13px;">No students found for ${classLabel(classKey)}.</p>`}
     `;
   }
 
@@ -2623,6 +2629,32 @@ function renderTeacherStudentsPanel(t, panelTabs, classKey, isAssociate){
     saveDB();
     render();
   };
+
+  document.querySelectorAll(".pw-reveal-btn").forEach(btn=>{
+    btn.onclick=()=>{
+      const span = document.querySelector(`.pw-reveal-text[data-roll="${btn.dataset.roll}"]`);
+      const stu = roster.find(s=>s.roll===btn.dataset.roll);
+      if(!span || !stu) return;
+      if(span.dataset.shown==="1"){
+        span.textContent = "••••••••";
+        span.dataset.shown = "0";
+        btn.textContent = "👁";
+      } else {
+        span.textContent = currentPassword("student", stu.roll, stu.password);
+        span.dataset.shown = "1";
+        btn.textContent = "🙈";
+      }
+    };
+  });
+  document.querySelectorAll(".pw-reset-stu-btn").forEach(btn=>{
+    btn.onclick=()=>{
+      const newPw = prompt(`Set a new password for ${btn.dataset.name} (Roll ${btn.dataset.roll}) — at least 6 characters:`);
+      if(newPw===null) return;
+      if(newPw.trim().length<6){ alert("Password must be at least 6 characters. Nothing was changed."); return; }
+      setPassword("student", btn.dataset.roll, newPw.trim());
+      alert("Password updated for "+btn.dataset.name+".");
+    };
+  });
 
   const submitBtn = document.getElementById("submitStuEdits");
   if(submitBtn) submitBtn.onclick=()=>{
@@ -3861,6 +3893,11 @@ function renderAdminStaffPanel(panelTabs){
     <td>${assignCell}</td>
     <td>${assocCell}</td>
     <td>
+      <span class="pw-reveal-text" data-tid="${t.id}" style="font-family:monospace;">••••••••</span>
+      <button type="button" class="pw-reveal-staff-btn" data-tid="${t.id}" style="background:none;border:none;cursor:pointer;font-size:14px;">👁</button>
+      <button type="button" class="pw-reset-staff-btn" data-tid="${t.id}" data-name="${t.name}" style="background:none;border:none;cursor:pointer;font-size:14px;" title="Set new password">🔑</button>
+    </td>
+    <td>
       <button class="btn btn-outline btn-sm" data-editstaff="${t.id}">Edit</button>
       <button class="btn btn-red btn-sm" data-delstaff="${t.id}">Delete</button>
     </td>
@@ -3911,10 +3948,10 @@ function renderAdminStaffPanel(panelTabs){
       ${editing ? `<button class="btn btn-outline" id="stCancelEdit">Cancel Edit</button>` : ""}
 
       <h4 style="color:var(--navy);margin-top:24px;margin-bottom:10px;">Regular Staff (${regular.length})</h4>
-      <div class="scrollbox"><table><tr><th>Name</th><th>Designation</th><th>Subject</th><th>Mobile</th><th>Class Assigned</th><th>Associate Class</th><th></th></tr>${rowsFor(regular)}</table></div>
+      <div class="scrollbox"><table><tr><th>Name</th><th>Designation</th><th>Subject</th><th>Mobile</th><th>Class Assigned</th><th>Associate Class</th><th>Password</th><th></th></tr>${rowsFor(regular)}</table></div>
 
       <h4 style="color:var(--navy);margin-top:20px;margin-bottom:10px;">Contractual Staff (${contractual.length})</h4>
-      <div class="scrollbox"><table><tr><th>Name</th><th>Designation</th><th>Subject</th><th>Mobile</th><th>Class Assigned</th><th>Associate Class</th><th></th></tr>${rowsFor(contractual)}</table></div>
+      <div class="scrollbox"><table><tr><th>Name</th><th>Designation</th><th>Subject</th><th>Mobile</th><th>Class Assigned</th><th>Associate Class</th><th>Password</th><th></th></tr>${rowsFor(contractual)}</table></div>
     </div>
   `;
   document.getElementById("back").onclick=()=>{session=null;staffEditingId=null;go("home");};
@@ -3980,6 +4017,31 @@ function renderAdminStaffPanel(panelTabs){
 
   document.querySelectorAll("[data-editstaff]").forEach(btn=>{
     btn.onclick=()=>{ staffEditingId = btn.dataset.editstaff; render(); };
+  });
+  document.querySelectorAll(".pw-reveal-staff-btn").forEach(btn=>{
+    btn.onclick=()=>{
+      const span = document.querySelector(`.pw-reveal-text[data-tid="${btn.dataset.tid}"]`);
+      const teach = TEACHERS.find(x=>x.id===btn.dataset.tid);
+      if(!span || !teach) return;
+      if(span.dataset.shown==="1"){
+        span.textContent = "••••••••";
+        span.dataset.shown = "0";
+        btn.textContent = "👁";
+      } else {
+        span.textContent = currentPassword("teacher", teach.id, teach.password);
+        span.dataset.shown = "1";
+        btn.textContent = "🙈";
+      }
+    };
+  });
+  document.querySelectorAll(".pw-reset-staff-btn").forEach(btn=>{
+    btn.onclick=()=>{
+      const newPw = prompt(`Set a new password for ${btn.dataset.name} — at least 6 characters:`);
+      if(newPw===null) return;
+      if(newPw.trim().length<6){ alert("Password must be at least 6 characters. Nothing was changed."); return; }
+      setPassword("teacher", btn.dataset.tid, newPw.trim());
+      alert("Password updated for "+btn.dataset.name+".");
+    };
   });
   document.querySelectorAll("[data-delstaff]").forEach(btn=>{
     btn.onclick=()=>{
@@ -4087,6 +4149,11 @@ function renderAdminStudentPanel(panelTabs){
     <tr>
       <td>${s.roll}</td><td>${s.name}</td><td>${s.mobile||"—"}</td><td>${s.dob||"—"}</td><td>${s.house||"—"}</td>
       <td>
+        <span class="pw-reveal-text" data-roll="${s.roll}" style="font-family:monospace;">••••••••</span>
+        <button type="button" class="pw-reveal-btn" data-roll="${s.roll}" style="background:none;border:none;cursor:pointer;font-size:14px;">👁</button>
+        <button type="button" class="pw-reset-stu-btn" data-roll="${s.roll}" data-name="${s.name}" style="background:none;border:none;cursor:pointer;font-size:14px;" title="Set new password">🔑</button>
+      </td>
+      <td>
         <button class="btn btn-outline btn-sm" data-editstu="${s.roll}">Edit</button>
         <button class="btn btn-red btn-sm" data-delstu="${s.roll}">Delete (TC)</button>
       </td>
@@ -4172,7 +4239,7 @@ function renderAdminStudentPanel(panelTabs){
         </div>
       </div>
       <p style="font-size:12px;color:var(--muted);margin-bottom:8px;">${list.length} student(s) in ${classLabel(studentFilterClass)}${studentSearchTerm?" matching \""+studentSearchTerm+"\"":""}.</p>
-      ${list.length ? `<div class="scrollbox"><table><tr><th>Roll</th><th>Name</th><th>Mobile</th><th>DOB</th><th>House</th><th></th></tr>${rows}</table></div>` : `<p style="color:var(--muted);font-size:13px;">No students found.</p>`}
+      ${list.length ? `<div class="scrollbox"><table><tr><th>Roll</th><th>Name</th><th>Mobile</th><th>DOB</th><th>House</th><th>Password</th><th></th></tr>${rows}</table></div>` : `<p style="color:var(--muted);font-size:13px;">No students found.</p>`}
     </div>
   `;
   document.getElementById("back").onclick=()=>{session=null;studentEditingRoll=null;go("home");};
@@ -4277,6 +4344,31 @@ function renderAdminStudentPanel(panelTabs){
 
   document.querySelectorAll("[data-editstu]").forEach(btn=>{
     btn.onclick=()=>{ studentEditingRoll = btn.dataset.editstu; render(); };
+  });
+  document.querySelectorAll(".pw-reveal-btn").forEach(btn=>{
+    btn.onclick=()=>{
+      const span = document.querySelector(`.pw-reveal-text[data-roll="${btn.dataset.roll}"]`);
+      const stu = STUDENTS.find(s=>s.roll===btn.dataset.roll);
+      if(!span || !stu) return;
+      if(span.dataset.shown==="1"){
+        span.textContent = "••••••••";
+        span.dataset.shown = "0";
+        btn.textContent = "👁";
+      } else {
+        span.textContent = currentPassword("student", stu.roll, stu.password);
+        span.dataset.shown = "1";
+        btn.textContent = "🙈";
+      }
+    };
+  });
+  document.querySelectorAll(".pw-reset-stu-btn").forEach(btn=>{
+    btn.onclick=()=>{
+      const newPw = prompt(`Set a new password for ${btn.dataset.name} (Roll ${btn.dataset.roll}) — at least 6 characters:`);
+      if(newPw===null) return;
+      if(newPw.trim().length<6){ alert("Password must be at least 6 characters. Nothing was changed."); return; }
+      setPassword("student", btn.dataset.roll, newPw.trim());
+      alert("Password updated for "+btn.dataset.name+".");
+    };
   });
   document.querySelectorAll("[data-delstu]").forEach(btn=>{
     btn.onclick=()=>{
