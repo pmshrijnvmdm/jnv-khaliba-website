@@ -2651,7 +2651,21 @@ function renderTeacherSubjectMarksPanel(t, panelTabs){
   const outOfInp = document.getElementById("subjOutOf");
   if(outOfInp) outOfInp.onchange=(e)=>{
     const subjObj = rr.subjects.find(s=>s.name===subjMarksSubject);
-    if(subjObj) subjObj.maxMarks = Number(e.target.value)||100;
+    const newMax = Number(e.target.value)||100;
+    const roster = studentsForClass(subjMarksClass);
+    const overLimit = roster.filter(s=>{
+      const v = markFor(rr, s.roll, subjMarksSubject);
+      return v!=="" && v!=null && Number(v) > newMax;
+    });
+    if(overLimit.length){
+      const names = overLimit.map(s=>`${s.roll} (${markFor(rr,s.roll,subjMarksSubject)})`).join(", ");
+      if(!confirm(`These students already have marks higher than ${newMax}: ${names}.\n\nClick OK to clear those marks so they can be re-entered correctly, or Cancel to keep "Out of" as it was.`)){
+        e.target.value = subjObj ? subjObj.maxMarks : 100; // revert the input
+        return;
+      }
+      overLimit.forEach(s=>{ setMarkFor(rr, s.roll, subjMarksSubject, ""); });
+    }
+    if(subjObj) subjObj.maxMarks = newMax;
     saveDB();
     render();
   };
