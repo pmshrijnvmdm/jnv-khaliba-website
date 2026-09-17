@@ -1048,7 +1048,7 @@ function renderPublicHome(){
   const homeVid = effectiveHomeVideo();
   const heroVideoHtml = homeVid ? `
     <div class="hero-video-wrap">
-      <video src="${homeVid}" autoplay muted loop playsinline></video>
+      <video src="${homeVid}" autoplay muted loop playsinline controls preload="auto"></video>
     </div>` : "";
 
   app.innerHTML = `
@@ -1116,6 +1116,16 @@ function renderPublicHome(){
       if(!document.getElementById("homeSlider")){ clearInterval(timer); return; }
       goToSlide((cur+1) % slideEls.length);
     }, 4000);
+  }
+  const heroVideoEl = document.querySelector(".hero-video-wrap video");
+  if(heroVideoEl){
+    heroVideoEl.onerror = ()=>{
+      const wrap = heroVideoEl.closest(".hero-video-wrap");
+      if(wrap) wrap.style.display = "none";
+    };
+    // Some desktop browsers block muted autoplay unless explicitly kicked off from JS.
+    const playPromise = heroVideoEl.play();
+    if(playPromise && playPromise.catch) playPromise.catch(()=>{ /* user can press the visible controls */ });
   }
 }
 
