@@ -333,8 +333,6 @@ try{
 // silently reverting a just-typed mark to whatever was last confirmed on the server.
 // A short rolling window absorbs all of them, and is refreshed by every further edit.
 let suppressSnapshotUntil = { main:0, students:0, teachers:0 };
-function suppressSnapshotsFor(key, ms){ suppressSnapshotUntil[key] = Date.now() + (ms||4000); }
-function isSnapshotSuppressed(key){ return Date.now() < suppressSnapshotUntil[key]; }
 
 function cacheLocally(){
   try{
@@ -350,6 +348,19 @@ function sanitizeForFirestore(obj){
   // is a simple, reliable way to drop every undefined value before we ever try to save.
   return JSON.parse(JSON.stringify(obj));
 }
+// Suppress incoming snapshots for "main" while ANY of our own writes are still in
+// flight (not time-based — a fixed window can expire during a natural typing pause,
+// letting a late, stale server confirmation silently revert what was just entered).
+// A small settle buffer after the last write finishes covers the brief gap between a
+// write's promise resolving and Firestore's own listener actually firing for it.
+let pendingMainSaves = 0;
+let mainSuppressSettleUntil = 0;
+function isSnapshotSuppressed(key){
+  if(key==="main") return pendingMainSaves>0 || Date.now()<mainSuppressSettleUntil;
+  return Date.now() < suppressSnapshotUntil[key];
+}
+function suppressSnapshotsFor(key, ms){ suppressSnapshotUntil[key] = Date.now() + (ms||4000); }
+
 let saveDBChain = Promise.resolve();
 let pendingDeletions = [];
 function deleteFromDB(topKey, subKey){
@@ -363,7 +374,7 @@ function deleteFromDB(topKey, subKey){
 }
 function saveDB(){
   cacheLocally();
-  suppressSnapshotsFor("main");
+  pendingMainSaves++;
   // Fetch-then-merge before writing: if another device saved something (a published
   // result, a new notice, etc.) that hasn't synced to this tab yet, a blind overwrite
   // here would silently erase it. Instead, merge dictionary-shaped fields (results,
@@ -401,6 +412,13 @@ function saveDB(){
       await fsdb.collection("appdata").doc("main").set(sanitizeForFirestore(DB));
     }catch(err){
       console.error("Firestore save failed:", err);
+    }
+    pendingMainSaves--;
+    if(pendingMainSaves<=0){
+      pendingMainSaves = 0;
+      // Keep suppressing for a short buffer after the last write settles, since
+      // Firestore's own listener can fire a moment after the write promise resolves.
+      mainSuppressSettleUntil = Date.now() + 2500;
     }
   });
   return true;
