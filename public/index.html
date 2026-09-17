@@ -755,6 +755,12 @@ function setPassword(role,id,newPass){
   saveDB();
 }
 function classLabel(key){ if(key==="NONE") return "Not a Class Teacher"; const c = CLASS_LIST.find(x=>x.key===key); return c?c.label:key; }
+function studentPhotoHtml(stu, size){
+  size = size || 56;
+  return stu.photo
+    ? `<img src="${stu.photo}" style="width:${size}px;height:${size}px;border-radius:50%;object-fit:cover;border:2px solid var(--line);">`
+    : `<div style="width:${size}px;height:${size}px;border-radius:50%;background:#eee;display:flex;align-items:center;justify-content:center;font-size:${Math.round(size*0.45)}px;border:2px solid var(--line);">👤</div>`;
+}
 function examLabel(key){ const e = EXAMS.find(x=>x.key===key); return e?e.label:key; }
 function examsForClass(classKey){
   const clsNum = (classKey||"").split("-")[0];
@@ -2900,6 +2906,7 @@ function renderTeacherStudentsPanel(t, panelTabs, classKey, isAssociate){
   } else {
     const rows = roster.map(s=>`
       <tr>
+        <td>${studentPhotoHtml(s,36)}</td>
         <td>${s.roll}</td>
         <td>${s.name}</td>
         <td>${s.mobile||'<span style="color:var(--red);">Missing</span>'}</td>
@@ -2920,7 +2927,7 @@ function renderTeacherStudentsPanel(t, panelTabs, classKey, isAssociate){
         Tap 👁 next to a student to see their current password, in case a parent needs to be told.
       </div>
       ${!requested ? `<button class="btn btn-outline" id="requestEditBtn" style="margin-top:10px;">Request Edit Permission for ${classLabel(classKey)}</button>` : ""}
-      ${roster.length ? `<div class="scrollbox" style="margin-top:14px;"><table><tr><th>Roll</th><th>Name</th><th>Mobile</th><th>DOB</th><th>House</th><th>Admission No.</th><th>Password</th></tr>${rows}</table></div>` : `<p style="color:var(--muted);font-size:13px;">No students found for ${classLabel(classKey)}.</p>`}
+      ${roster.length ? `<div class="scrollbox" style="margin-top:14px;"><table><tr><th>Photo</th><th>Roll</th><th>Name</th><th>Mobile</th><th>DOB</th><th>House</th><th>Admission No.</th><th>Password</th></tr>${rows}</table></div>` : `<p style="color:var(--muted);font-size:13px;">No students found for ${classLabel(classKey)}.</p>`}
     `;
   }
 
@@ -3705,7 +3712,7 @@ function renderPrincipalDash(){
           }).join("");
           const ov = studentOverall(rr, s.roll);
           const rg = ranksAndGrades2[s.roll];
-          return `<tr><td>${s.roll}</td><td>${s.name}</td>${cells}<td>${ov?ov.pct.toFixed(1)+"%":"—"}</td><td>${rg?rg.rank:"—"}</td><td>${rg?rg.relGrade:"—"}</td></tr>`;
+          return `<tr><td>${studentPhotoHtml(s,36)}</td><td>${s.roll}</td><td>${s.name}</td>${cells}<td>${ov?ov.pct.toFixed(1)+"%":"—"}</td><td>${rg?rg.rank:"—"}</td><td>${rg?rg.relGrade:"—"}</td></tr>`;
         }).join("");
         let actions;
         if(rr.status==="draft"){
@@ -3721,7 +3728,7 @@ function renderPrincipalDash(){
         detailHtml = `
           <div style="margin-top:16px;border-top:1px solid var(--line);padding-top:16px;">
             <h4 style="color:var(--navy)">${examLabel(principalSelectedExamKey)} — All Subjects</h4>
-            <div class="scrollbox"><table><tr><th>Roll</th><th>Name</th>${subjHeaders}<th>Overall %</th><th>Rank</th><th>Grade</th></tr>${rows2}</table></div>
+            <div class="scrollbox"><table><tr><th>Photo</th><th>Roll</th><th>Name</th>${subjHeaders}<th>Overall %</th><th>Rank</th><th>Grade</th></tr>${rows2}</table></div>
             <div style="margin-top:10px;">${actions}</div>
             <div class="hist">${rr.history.length? "<b>History:</b><br>"+rr.history.join("<br>") : ""}</div>
           </div>
@@ -4725,7 +4732,14 @@ function renderAdminStudentPanel(panelTabs){
       </select>
       <label>Admission No. (optional)</label>
       <input id="stuAdmno" value="${editing?editing.admno:""}" placeholder="Admission number">
-      <label>Photo (optional — used on the Toppers page)</label>
+      <label>Photo (optional — used on the Toppers page and result views)</label>
+      ${editing && editing.photo ? `
+        <div style="margin:6px 0;display:flex;align-items:center;gap:10px;">
+          ${studentPhotoHtml(editing, 56)}
+          <label style="display:flex;align-items:center;gap:6px;font-weight:400;margin:0;">
+            <input type="checkbox" id="stuRemovePhoto"> Remove current photo
+          </label>
+        </div>` : ""}
       <input id="stuPhoto" type="file" accept="image/*">
       <div class="error" id="stuErr"></div>
       <div class="success" id="stuOk"></div>
@@ -4783,10 +4797,12 @@ function renderAdminStudentPanel(panelTabs){
       const admno = document.getElementById("stuAdmno").value.trim();
       const rollInput = document.getElementById("stuRoll").value.trim();
       const photoFile = document.getElementById("stuPhoto").files[0];
+      const removePhotoEl = document.getElementById("stuRemovePhoto");
+      const removePhoto = removePhotoEl && removePhotoEl.checked;
 
       if(!name){ errEl.textContent="Please enter the student's name."; return; }
 
-      let photo = (editing && editing.photo) ? editing.photo : "";
+      let photo = (editing && editing.photo && !removePhoto) ? editing.photo : "";
       if(photoFile){
         try{ photo = await uploadToCloudinary(photoFile, "image"); }
         catch(e){ errEl.textContent="Photo upload failed: "+e.message; return; }
@@ -5533,8 +5549,13 @@ function renderStudentDash(){
   app.innerHTML = `
     <button class="back-link" id="back">&larr; Logout</button>
     <div class="card">
-      <h2 style="color:var(--navy)">Welcome, ${stu.name}</h2>
-      <p style="color:var(--muted);font-size:13px;">Roll No ${stu.roll} · ${classLabel(classKey)} · ${stu.house?("House: "+stu.house):""}</p>
+      <div style="display:flex;align-items:center;gap:14px;">
+        ${studentPhotoHtml(stu, 64)}
+        <div>
+          <h2 style="color:var(--navy);margin:0;">Welcome, ${stu.name}</h2>
+          <p style="color:var(--muted);font-size:13px;margin-top:2px;">Roll No ${stu.roll} · ${classLabel(classKey)} · ${stu.house?("House: "+stu.house):""}</p>
+        </div>
+      </div>
       ${panelTabs}
     </div>
     ${attendanceCard}
