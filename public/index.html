@@ -963,6 +963,7 @@ function wirePrincipalTabs(){
   const ho = document.getElementById("pTabHouses"); if(ho) ho.onclick=()=>{ principalPanel="houses"; render(); };
   const msg = document.getElementById("pTabMessages"); if(msg) msg.onclick=()=>{ principalPanel="messages"; render(); };
   const editReqTab = document.getElementById("pTabEditRequests"); if(editReqTab) editReqTab.onclick=()=>{ principalPanel="editrequests"; render(); };
+  const contentTab = document.getElementById("pTabContent"); if(contentTab) contentTab.onclick=()=>{ principalPanel="content"; render(); };
   const s = document.getElementById("pTabStaff"); if(s) s.onclick=()=>{ principalPanel="staff"; render(); };
   const st = document.getElementById("pTabStudents"); if(st) st.onclick=()=>{ principalPanel="students"; render(); };
   const se = document.getElementById("pTabSettings"); if(se) se.onclick=()=>{ principalPanel="settings"; render(); };
@@ -2025,8 +2026,10 @@ function renderTeacherDash(){
     <th style="${inactive?'opacity:0.5;':''}">
       ${s.name}<br>
       <span style="font-weight:400;font-size:10.5px;">out of
-        <input class="maxmarks-box" data-si="${si}" type="number" min="0" value="${s.maxMarks}" ${locked?"disabled":""} style="width:52px;padding:3px 4px;">
+        <input class="maxmarks-box" data-si="${si}" type="number" min="0" value="${s.maxMarks}" ${locked?"disabled":""} style="width:44px;padding:3px 4px;">
+        ${!locked ? `<button class="btn btn-outline btn-sm" data-savemax="${si}" type="button" style="font-size:9px;padding:1px 4px;">Set</button>` : ""}
       </span>
+      <br><span class="maxmarks-confirm" data-si-confirm="${si}" style="font-size:9.5px;color:var(--muted);">currently: ${s.maxMarks}</span>
       ${inactive?'<br><span style="font-size:9.5px;color:var(--red);">Not held this exam</span>':
         `<br><span style="font-size:9.5px;color:var(--muted);">${filledCount}/${roster.length} filled${editor?` · by ${editor}`:""}</span>`}
       ${subjLocked && !locked ? `<br><span style="font-size:9.5px;color:var(--red);">🔒 Submitted</span> <button class="btn btn-outline btn-sm" data-unlocksubj="${s.name}" style="font-size:9px;padding:1px 5px;margin-top:2px;">Unlock</button>` : ""}
@@ -2120,10 +2123,24 @@ function renderTeacherDash(){
 
   if(!locked){
     document.querySelectorAll(".maxmarks-box").forEach(inp=>{
-      inp.onchange=(e)=>{
-        const v = e.target.value.trim();
-        r.subjects[Number(e.target.dataset.si)].maxMarks = (v==="" || isNaN(Number(v))) ? 100 : Number(v);
-        saveDB(); render();
+      // Live "currently: X" text next to the box updates as you type, so a mis-typed
+      // value is visible immediately — nothing is saved until "Set" is clicked.
+      inp.oninput=(e)=>{
+        const label = document.querySelector(`.maxmarks-confirm[data-si-confirm="${e.target.dataset.si}"]`);
+        if(label) label.textContent = "typed: " + (e.target.value || "(empty)");
+      };
+    });
+    document.querySelectorAll("[data-savemax]").forEach(btn=>{
+      btn.onclick=()=>{
+        const si = Number(btn.dataset.savemax);
+        const inp = document.querySelector(`.maxmarks-box[data-si="${si}"]`);
+        const v = inp.value.trim();
+        const newVal = (v==="" || isNaN(Number(v))) ? 100 : Number(v);
+        r.subjects[si].maxMarks = newVal;
+        saveDB();
+        const label = document.querySelector(`.maxmarks-confirm[data-si-confirm="${si}"]`);
+        if(label) label.textContent = "✅ saved: " + newVal;
+        setTimeout(render, 600);
       };
     });
     document.querySelectorAll("[data-unlocksubj]").forEach(btn=>{
@@ -3556,6 +3573,7 @@ function renderPrincipalDash(){
       <button class="btn ${principalPanel==='houses'?'btn-primary':'btn-outline'} btn-sm" id="pTabHouses" style="margin-right:8px;">🏠 Houses</button>
       <button class="btn ${principalPanel==='messages'?'btn-primary':'btn-outline'} btn-sm" id="pTabMessages" style="margin-right:8px;">📩 Messages${Object.values(DB.contactMessages).some(m=>!m.read) ? ` <span style="background:#c0392b;color:#fff;border-radius:10px;padding:1px 6px;font-size:10px;">new</span>` : ""}</button>
       <button class="btn ${principalPanel==='editrequests'?'btn-primary':'btn-outline'} btn-sm" id="pTabEditRequests" style="margin-right:8px;">📋 Edit Requests${Object.values(DB.classEditRequests||{}).some(v=>v.status==="requested") ? ` <span style="background:#c0392b;color:#fff;border-radius:10px;padding:1px 6px;font-size:10px;">new</span>` : ""}</button>
+      <button class="btn ${principalPanel==='content'?'btn-primary':'btn-outline'} btn-sm" id="pTabContent" style="margin-right:8px;">📝 Blog / Career Content</button>
       ${isAdmin ? `<button class="btn ${principalPanel==='staff'?'btn-primary':'btn-outline'} btn-sm" id="pTabStaff" style="margin-right:8px;">👤 Staff Management</button>` : ""}
       ${isAdmin ? `<button class="btn ${principalPanel==='students'?'btn-primary':'btn-outline'} btn-sm" id="pTabStudents" style="margin-right:8px;">🎓 Student Management</button>` : ""}
       ${isAdmin ? `<button class="btn ${principalPanel==='settings'?'btn-primary':'btn-outline'} btn-sm" id="pTabSettings" style="margin-right:8px;">⚙️ Site Settings</button>` : ""}
@@ -3588,6 +3606,10 @@ function renderPrincipalDash(){
   }
   if(principalPanel === "editrequests"){
     renderEditRequestsPanel(panelTabs);
+    return;
+  }
+  if(principalPanel === "content"){
+    renderContentModerationPanel(panelTabs);
     return;
   }
   if(principalPanel === "houses"){
@@ -4202,6 +4224,91 @@ function renderEditRequestsPanel(panelTabs){
       render();
     };
   });
+}
+
+/* ---------------- CONTENT MODERATION — Admin/Principal can edit or delete ANY Blog
+   post or Career Guidance entry, from any teacher or the Library. ---------------- */
+let contentEditingId = null; // "blog:5" or "guidance:3"
+function renderContentModerationPanel(panelTabs){
+  const editingParts = contentEditingId ? contentEditingId.split(":") : null;
+  const editing = editingParts ? (editingParts[0]==="blog" ? DB.blogs[editingParts[1]] : DB.careerGuides[editingParts[1]]) : null;
+
+  let editFormHtml = "";
+  if(editing){
+    editFormHtml = `
+      <div class="card">
+        <h4 style="color:var(--navy);margin-bottom:10px;">Editing: ${editing.title}</h4>
+        <label>Title</label>
+        <input id="contentEditTitle" value="${editing.title}">
+        <label>Content</label>
+        <textarea id="contentEditBody" rows="7">${editing.content}</textarea>
+        <div class="error" id="contentEditErr"></div>
+        <div class="success" id="contentEditOk"></div>
+        <button class="btn btn-primary" id="contentEditSave" style="margin-top:8px;">Save Changes</button>
+        <button class="btn btn-outline" id="contentEditCancel" style="margin-top:8px;">Cancel</button>
+      </div>`;
+  }
+
+  const blogRows = Object.values(DB.blogs).sort((a,b)=>b.id-a.id).map(p=>`
+    <tr><td>${p.title}</td><td>${p.author||"—"}</td><td>${p.addedOn}</td>
+      <td><button class="btn btn-outline btn-sm" data-editcontent="blog:${p.id}">Edit</button> <button class="btn btn-red btn-sm" data-delcontent="blog:${p.id}">Delete</button></td>
+    </tr>`).join("");
+  const guideRows = Object.values(DB.careerGuides).sort((a,b)=>b.id-a.id).map(p=>`
+    <tr><td>${p.title}</td><td>${p.author||"—"}</td><td>${p.addedOn}</td>
+      <td><button class="btn btn-outline btn-sm" data-editcontent="guidance:${p.id}">Edit</button> <button class="btn btn-red btn-sm" data-delcontent="guidance:${p.id}">Delete</button></td>
+    </tr>`).join("");
+
+  app.innerHTML = `
+    <button class="back-link" id="back">&larr; Logout</button>
+    <div class="card">
+      <h2 style="color:var(--navy)">Welcome, ${currentActor().name}</h2>
+      <p style="color:var(--muted);font-size:13px;">${currentActor().designation}</p>
+      ${panelTabs}
+      <p style="font-size:12px;color:var(--muted);margin-bottom:10px;">
+        Any teacher or the Library can post here — as Admin/Principal you can edit or remove anyone's post if it needs a correction or shouldn't be public.
+      </p>
+
+      <h4 style="color:var(--navy);margin-bottom:10px;">Blog Posts (${Object.keys(DB.blogs).length})</h4>
+      ${Object.keys(DB.blogs).length ? `<div class="scrollbox"><table><tr><th>Title</th><th>By</th><th>Date</th><th></th></tr>${blogRows}</table></div>` : `<p style="color:var(--muted);font-size:13px;">No blog posts yet.</p>`}
+
+      <h4 style="color:var(--navy);margin-top:20px;margin-bottom:10px;">Career Guidance (${Object.keys(DB.careerGuides).length})</h4>
+      ${Object.keys(DB.careerGuides).length ? `<div class="scrollbox"><table><tr><th>Title</th><th>By</th><th>Date</th><th></th></tr>${guideRows}</table></div>` : `<p style="color:var(--muted);font-size:13px;">No career guidance posts yet.</p>`}
+    </div>
+    ${editFormHtml}
+  `;
+  document.getElementById("back").onclick=()=>{session=null;go("home");};
+  wirePrincipalTabs();
+
+  document.querySelectorAll("[data-editcontent]").forEach(btn=>{
+    btn.onclick=()=>{ contentEditingId = btn.dataset.editcontent; render(); };
+  });
+  document.querySelectorAll("[data-delcontent]").forEach(btn=>{
+    btn.onclick=()=>{
+      if(!confirm("Delete this post permanently?")) return;
+      const [kind, id] = btn.dataset.delcontent.split(":");
+      deleteFromDB(kind==="blog" ? "blogs" : "careerGuides", id);
+      saveDB();
+      render();
+    };
+  });
+
+  const cancelBtn = document.getElementById("contentEditCancel");
+  if(cancelBtn) cancelBtn.onclick=()=>{ contentEditingId=null; render(); };
+
+  const saveBtn = document.getElementById("contentEditSave");
+  if(saveBtn) saveBtn.onclick=()=>{
+    const title = document.getElementById("contentEditTitle").value.trim();
+    const content = document.getElementById("contentEditBody").value.trim();
+    const errEl = document.getElementById("contentEditErr"); errEl.textContent="";
+    if(!title){ errEl.textContent="Title cannot be empty."; return; }
+    if(!content){ errEl.textContent="Content cannot be empty."; return; }
+    editing.title = title;
+    editing.content = content;
+    saveDB();
+    document.getElementById("contentEditOk").textContent = "Saved.";
+    contentEditingId = null;
+    setTimeout(render, 600);
+  };
 }
 
 function renderPrincipalHousesPanel(panelTabs){
