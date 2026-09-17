@@ -512,6 +512,15 @@ function nextTeacherPassword(name){
 }
 
 /* ---------------- Firebase bootstrap: load real data, wire live sync, then render ---------------- */
+// Prevent the browser's default "scroll wheel over a focused number input changes its
+// value" behaviour everywhere on the site — a teacher scrolling the page while their
+// cursor happens to be over a marks box should never silently change a number.
+document.addEventListener("wheel", (e)=>{
+  if(document.activeElement && document.activeElement.tagName==="INPUT" && document.activeElement.type==="number"){
+    document.activeElement.blur();
+  }
+}, { passive:true });
+
 async function bootstrapFirebase(){
   // Show something immediately using cached/bundled data instead of a blank screen
   // while we wait for the network — then silently swap in live data once it arrives.
@@ -916,6 +925,7 @@ function wirePrincipalTabs(){
   const c = document.getElementById("pTabCareers"); if(c) c.onclick=()=>{ principalPanel="careers"; render(); };
   const ho = document.getElementById("pTabHouses"); if(ho) ho.onclick=()=>{ principalPanel="houses"; render(); };
   const msg = document.getElementById("pTabMessages"); if(msg) msg.onclick=()=>{ principalPanel="messages"; render(); };
+  const editReqTab = document.getElementById("pTabEditRequests"); if(editReqTab) editReqTab.onclick=()=>{ principalPanel="editrequests"; render(); };
   const s = document.getElementById("pTabStaff"); if(s) s.onclick=()=>{ principalPanel="staff"; render(); };
   const st = document.getElementById("pTabStudents"); if(st) st.onclick=()=>{ principalPanel="students"; render(); };
   const se = document.getElementById("pTabSettings"); if(se) se.onclick=()=>{ principalPanel="settings"; render(); };
@@ -3508,6 +3518,7 @@ function renderPrincipalDash(){
       <button class="btn ${principalPanel==='careers'?'btn-primary':'btn-outline'} btn-sm" id="pTabCareers" style="margin-right:8px;">💼 Careers</button>
       <button class="btn ${principalPanel==='houses'?'btn-primary':'btn-outline'} btn-sm" id="pTabHouses" style="margin-right:8px;">🏠 Houses</button>
       <button class="btn ${principalPanel==='messages'?'btn-primary':'btn-outline'} btn-sm" id="pTabMessages" style="margin-right:8px;">📩 Messages${Object.values(DB.contactMessages).some(m=>!m.read) ? ` <span style="background:#c0392b;color:#fff;border-radius:10px;padding:1px 6px;font-size:10px;">new</span>` : ""}</button>
+      <button class="btn ${principalPanel==='editrequests'?'btn-primary':'btn-outline'} btn-sm" id="pTabEditRequests" style="margin-right:8px;">📋 Edit Requests${Object.values(DB.classEditRequests||{}).some(v=>v.status==="requested") ? ` <span style="background:#c0392b;color:#fff;border-radius:10px;padding:1px 6px;font-size:10px;">new</span>` : ""}</button>
       ${isAdmin ? `<button class="btn ${principalPanel==='staff'?'btn-primary':'btn-outline'} btn-sm" id="pTabStaff" style="margin-right:8px;">👤 Staff Management</button>` : ""}
       ${isAdmin ? `<button class="btn ${principalPanel==='students'?'btn-primary':'btn-outline'} btn-sm" id="pTabStudents" style="margin-right:8px;">🎓 Student Management</button>` : ""}
       ${isAdmin ? `<button class="btn ${principalPanel==='settings'?'btn-primary':'btn-outline'} btn-sm" id="pTabSettings" style="margin-right:8px;">⚙️ Site Settings</button>` : ""}
@@ -3536,6 +3547,10 @@ function renderPrincipalDash(){
   }
   if(principalPanel === "messages"){
     renderPrincipalMessagesPanel(panelTabs);
+    return;
+  }
+  if(principalPanel === "editrequests"){
+    renderEditRequestsPanel(panelTabs);
     return;
   }
   if(principalPanel === "houses"){
@@ -4099,6 +4114,59 @@ function renderPrincipalMessagesPanel(panelTabs){
   });
 }
 
+/* ---------------- EDIT REQUESTS — shared by Principal and Admin: approve a Class
+   Teacher's request to edit their own class's student details ---------------- */
+function renderEditRequestsPanel(panelTabs){
+  const pendingRequests = Object.entries(DB.classEditRequests||{}).filter(([k,v])=>v.status==="requested");
+  const unlockedClasses = Object.entries(DB.classEditRequests||{}).filter(([k,v])=>v.status==="unlocked");
+
+  app.innerHTML = `
+    <button class="back-link" id="back">&larr; Logout</button>
+    <div class="card">
+      <h2 style="color:var(--navy)">Welcome, ${currentActor().name}</h2>
+      <p style="color:var(--muted);font-size:13px;">${currentActor().designation}</p>
+      ${panelTabs}
+      <p style="font-size:12px;color:var(--muted);margin-bottom:10px;">
+        When a Class Teacher needs to fix a student's Name, Mobile, DOB, House, or Gender (or add/remove a student), they request permission here first. Unlock lets them edit directly from their own dashboard; it locks again automatically once they submit their changes.
+      </p>
+
+      <h4 style="color:var(--navy);margin-bottom:10px;">Waiting for Approval (${pendingRequests.length})</h4>
+      ${pendingRequests.length ? `<div>${pendingRequests.map(([ck,v])=>`
+        <div class="fac-card fac-plain" style="margin-bottom:8px;">
+          <b>${classLabel(ck)}</b> — requested by <b>${v.requestedBy}</b> (${v.requestedOn})
+          <button class="btn btn-primary btn-sm" data-unlockclass="${ck}" style="margin-left:10px;">Unlock for Editing</button>
+        </div>`).join("")}</div>` : `<p style="color:var(--muted);font-size:13px;">No pending requests right now.</p>`}
+
+      <h4 style="color:var(--navy);margin-top:20px;margin-bottom:10px;">Currently Unlocked (${unlockedClasses.length})</h4>
+      ${unlockedClasses.length ? `<div>${unlockedClasses.map(([ck,v])=>`
+        <div class="fac-card fac-plain" style="margin-bottom:8px;">
+          <b>${classLabel(ck)}</b> — unlocked by ${v.unlockedBy||"—"} (${v.unlockedOn||""})
+          <button class="btn btn-outline btn-sm" data-relockclass="${ck}" style="margin-left:10px;">Re-lock</button>
+        </div>`).join("")}</div>` : `<p style="color:var(--muted);font-size:13px;">Nothing is currently unlocked.</p>`}
+    </div>
+  `;
+  document.getElementById("back").onclick=()=>{session=null;go("home");};
+  wirePrincipalTabs();
+
+  document.querySelectorAll("[data-unlockclass]").forEach(btn=>{
+    btn.onclick=()=>{
+      const ck = btn.dataset.unlockclass;
+      if(!DB.classEditRequests) DB.classEditRequests = {};
+      DB.classEditRequests[ck] = { status:"unlocked", unlockedBy: currentActor().name, unlockedOn: nowStr() };
+      saveDB();
+      render();
+    };
+  });
+  document.querySelectorAll("[data-relockclass]").forEach(btn=>{
+    btn.onclick=()=>{
+      const ck = btn.dataset.relockclass;
+      DB.classEditRequests[ck] = { status:"none" };
+      saveDB();
+      render();
+    };
+  });
+}
+
 function renderPrincipalHousesPanel(panelTabs){
   const fields = [
     ["srBoysHM","Boys — Senior House Master"],["srBoysAHM","Boys — Senior Asst. House Master"],
@@ -4287,7 +4355,17 @@ function renderAdminStaffPanel(panelTabs){
       }
 
       if(editing){
+        const oldId = editing.id;
         Object.assign(editing, { name, employmentType, designation, facultyCategory, subject, subjectFull:subject, id:loginId, mobile, qualification, experience, bio, photo });
+        if(loginId !== oldId){
+          // The login ID changed (e.g. a Contractual staff member's mobile number was
+          // updated). Class assignment, associate assignment, and password are all
+          // stored keyed by ID — migrate them to the new ID so nothing gets orphaned.
+          if(DB.teacherAssignments[oldId]!==undefined){ DB.teacherAssignments[loginId] = DB.teacherAssignments[oldId]; deleteFromDB("teacherAssignments", oldId); }
+          if(DB.associateAssignments[oldId]!==undefined){ DB.associateAssignments[loginId] = DB.associateAssignments[oldId]; deleteFromDB("associateAssignments", oldId); }
+          const oldPwKey = pwKey("teacher", oldId), newPwKey = pwKey("teacher", loginId);
+          if(DB.passwords[oldPwKey]!==undefined){ DB.passwords[newPwKey] = DB.passwords[oldPwKey]; deleteFromDB("passwords", oldPwKey); }
+        }
         staffEditingId = null;
       } else {
         TEACHERS.push({
@@ -4297,6 +4375,7 @@ function renderAdminStaffPanel(panelTabs){
         });
       }
       if(persistTeachers()){
+        saveDB(); // also persist any migrated teacherAssignments/associateAssignments/passwords
         document.getElementById("stOk").textContent = editing ? "Changes saved." : "Staff member added.";
         setTimeout(render, 600);
         return; // leave button disabled; the imminent re-render replaces it anyway
