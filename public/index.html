@@ -326,7 +326,15 @@ try{
   if(cachedT) TEACHERS = JSON.parse(cachedT);
 }catch(e){}
 
-let suppressNextSnapshot = { main:false, students:false, teachers:false };
+// Time-based suppression window (not a one-shot flag): Firestore commonly fires the
+// onSnapshot listener MORE THAN ONCE for a single local write (once optimistically,
+// once again when the server confirms it, sometimes more under load). A one-shot
+// boolean only survives the FIRST of those and lets a later one slip through mid-typing,
+// silently reverting a just-typed mark to whatever was last confirmed on the server.
+// A short rolling window absorbs all of them, and is refreshed by every further edit.
+let suppressSnapshotUntil = { main:0, students:0, teachers:0 };
+function suppressSnapshotsFor(key, ms){ suppressSnapshotUntil[key] = Date.now() + (ms||4000); }
+function isSnapshotSuppressed(key){ return Date.now() < suppressSnapshotUntil[key]; }
 
 function cacheLocally(){
   try{
@@ -355,7 +363,7 @@ function deleteFromDB(topKey, subKey){
 }
 function saveDB(){
   cacheLocally();
-  suppressNextSnapshot.main = true;
+  suppressSnapshotsFor("main");
   // Fetch-then-merge before writing: if another device saved something (a published
   // result, a new notice, etc.) that hasn't synced to this tab yet, a blind overwrite
   // here would silently erase it. Instead, merge dictionary-shaped fields (results,
@@ -399,7 +407,7 @@ function saveDB(){
 }
 function persistStudents(){
   cacheLocally();
-  suppressNextSnapshot.students = true;
+  suppressSnapshotsFor("students");
   fsdb.collection("appdata").doc("students").set(sanitizeForFirestore({ list: STUDENTS })).catch(err=>{
     console.error("Firestore save failed:", err);
   });
@@ -407,7 +415,7 @@ function persistStudents(){
 }
 function persistTeachers(){
   cacheLocally();
-  suppressNextSnapshot.teachers = true;
+  suppressSnapshotsFor("teachers");
   fsdb.collection("appdata").doc("teachers").set(sanitizeForFirestore({ list: TEACHERS })).catch(err=>{
     console.error("Firestore save failed:", err);
   });
@@ -421,7 +429,7 @@ function saveTeacherAssignment(teacherId, classKeyOrNull){
   if(classKeyOrNull===null || classKeyOrNull===undefined){ deleteFromDB("teacherAssignments", teacherId); }
   else { DB.teacherAssignments[teacherId] = classKeyOrNull; }
   cacheLocally();
-  suppressNextSnapshot.main = true;
+  suppressSnapshotsFor("main");
   const fieldPath = "teacherAssignments." + teacherId;
   const update = {};
   if(classKeyOrNull===null || classKeyOrNull===undefined){ update[fieldPath] = firebase.firestore.FieldValue.delete(); }
@@ -438,7 +446,7 @@ function saveAssociateAssignment(teacherId, classKeyOrNull){
   if(classKeyOrNull===null || classKeyOrNull===undefined){ deleteFromDB("associateAssignments", teacherId); }
   else { DB.associateAssignments[teacherId] = classKeyOrNull; }
   cacheLocally();
-  suppressNextSnapshot.main = true;
+  suppressSnapshotsFor("main");
   const fieldPath = "associateAssignments." + teacherId;
   const update = {};
   if(classKeyOrNull===null || classKeyOrNull===undefined){ update[fieldPath] = firebase.firestore.FieldValue.delete(); }
@@ -540,15 +548,15 @@ async function bootstrapFirebase(){
   const SAFE_TO_AUTO_RERENDER = ["home","about","academics","facilities","faculty","pyq","elibrary","notices","toppers","houses","gallery","careers","contact","instituteChoice"];
   function safeRerender(){ if(SAFE_TO_AUTO_RERENDER.includes(route)) render(); }
   mainRef.onSnapshot(snap=>{
-    if(suppressNextSnapshot.main){ suppressNextSnapshot.main=false; return; }
+    if(isSnapshotSuppressed("main")) return;
     if(snap.exists){ DB = Object.assign(defaultDB(), snap.data()); cacheLocally(); safeRerender(); }
   }, err=>console.error("main sync error:", err));
   studentsRef.onSnapshot(snap=>{
-    if(suppressNextSnapshot.students){ suppressNextSnapshot.students=false; return; }
+    if(isSnapshotSuppressed("students")) return;
     if(snap.exists && snap.data().list){ STUDENTS = snap.data().list; cacheLocally(); safeRerender(); }
   }, err=>console.error("students sync error:", err));
   teachersRef.onSnapshot(snap=>{
-    if(suppressNextSnapshot.teachers){ suppressNextSnapshot.teachers=false; return; }
+    if(isSnapshotSuppressed("teachers")) return;
     if(snap.exists && snap.data().list){ TEACHERS = snap.data().list; cacheLocally(); safeRerender(); }
   }, err=>console.error("teachers sync error:", err));
 
@@ -2035,7 +2043,7 @@ function renderTeacherDash(){
         <div class="success" id="bulkImportOk"></div>
       </div>` : ""}
       ${roster.length ? `
-      <div class="scrollbox" style="margin-top:10px;">
+      <div class="scrollbox" style="margin-top:10px;max-height:none;overflow-y:visible;">
         <table>
           <tr><th>Roll</th><th>Name</th>${subjectHeaders}<th>Overall %</th><th>Rank</th><th>Grade</th></tr>
           ${rows}
@@ -2601,7 +2609,7 @@ function renderTeacherSubjectMarksPanel(t, panelTabs){
           <label>Out of (max marks for this exam)</label>
           <input id="subjOutOf" type="number" min="1" value="${subjObj?subjObj.maxMarks:100}" style="width:100px;" ${locked?"disabled":""}>
         </div>` : ""}
-      <div class="scrollbox" style="margin-top:10px;">
+      <div class="scrollbox" style="margin-top:10px;max-height:none;overflow-y:visible;">
         <table><tr><th>Roll</th><th>Name</th><th>${subjMarksSubject}${subjObj?` (out of ${subjObj.maxMarks})`:""}</th></tr>${rows}</table>
       </div>
       ${!sheetLocked && !notHeld ? (subjLocked
