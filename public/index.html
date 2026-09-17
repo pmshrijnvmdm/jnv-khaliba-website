@@ -1754,7 +1754,7 @@ function renderTeacherLogin(){
     if(t && pw===currentPassword("teacher", t.id, t.password)){
       session={role:"teacher", teacher:t};
       teacherSelectedExam = null;
-      go(DB.teacherAssignments[t.id] ? "teacherDash" : "teacherSelectClass");
+      go((DB.teacherAssignments[t.id] || DB.associateAssignments[t.id]) ? "teacherDash" : "teacherSelectClass");
     } else {
       document.getElementById("terr").textContent="Invalid ID/Mobile or password.";
     }
