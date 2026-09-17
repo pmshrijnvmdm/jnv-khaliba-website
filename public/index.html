@@ -326,13 +326,22 @@ try{
   if(cachedT) TEACHERS = JSON.parse(cachedT);
 }catch(e){}
 
-// Time-based suppression window (not a one-shot flag): Firestore commonly fires the
-// onSnapshot listener MORE THAN ONCE for a single local write (once optimistically,
-// once again when the server confirms it, sometimes more under load). A one-shot
-// boolean only survives the FIRST of those and lets a later one slip through mid-typing,
-// silently reverting a just-typed mark to whatever was last confirmed on the server.
-// A short rolling window absorbs all of them, and is refreshed by every further edit.
-let suppressSnapshotUntil = { main:0, students:0, teachers:0 };
+// Suppress incoming snapshots for a document while ANY of our own writes to it are
+// still in flight — not time-based, since a fixed window can expire during a natural
+// typing pause (e.g. a teacher pausing between students), letting a late/stale server
+// confirmation silently revert what was just entered. A small settle buffer after the
+// last write finishes covers the brief gap between a write's promise resolving and
+// Firestore's own listener actually firing for it.
+let pendingSaves = { main:0, students:0, teachers:0 };
+let suppressSettleUntil = { main:0, students:0, teachers:0 };
+function isSnapshotSuppressed(key){
+  return pendingSaves[key]>0 || Date.now()<suppressSettleUntil[key];
+}
+function beginSave(key){ pendingSaves[key] = (pendingSaves[key]||0) + 1; }
+function endSave(key){
+  pendingSaves[key] = Math.max(0, (pendingSaves[key]||0) - 1);
+  if(pendingSaves[key]===0){ suppressSettleUntil[key] = Date.now() + 2500; }
+}
 
 function cacheLocally(){
   try{
@@ -348,18 +357,6 @@ function sanitizeForFirestore(obj){
   // is a simple, reliable way to drop every undefined value before we ever try to save.
   return JSON.parse(JSON.stringify(obj));
 }
-// Suppress incoming snapshots for "main" while ANY of our own writes are still in
-// flight (not time-based — a fixed window can expire during a natural typing pause,
-// letting a late, stale server confirmation silently revert what was just entered).
-// A small settle buffer after the last write finishes covers the brief gap between a
-// write's promise resolving and Firestore's own listener actually firing for it.
-let pendingMainSaves = 0;
-let mainSuppressSettleUntil = 0;
-function isSnapshotSuppressed(key){
-  if(key==="main") return pendingMainSaves>0 || Date.now()<mainSuppressSettleUntil;
-  return Date.now() < suppressSnapshotUntil[key];
-}
-function suppressSnapshotsFor(key, ms){ suppressSnapshotUntil[key] = Date.now() + (ms||4000); }
 
 let saveDBChain = Promise.resolve();
 let pendingDeletions = [];
@@ -374,7 +371,7 @@ function deleteFromDB(topKey, subKey){
 }
 function saveDB(){
   cacheLocally();
-  pendingMainSaves++;
+  beginSave("main");
   // Fetch-then-merge before writing: if another device saved something (a published
   // result, a new notice, etc.) that hasn't synced to this tab yet, a blind overwrite
   // here would silently erase it. Instead, merge dictionary-shaped fields (results,
@@ -413,30 +410,24 @@ function saveDB(){
     }catch(err){
       console.error("Firestore save failed:", err);
     }
-    pendingMainSaves--;
-    if(pendingMainSaves<=0){
-      pendingMainSaves = 0;
-      // Keep suppressing for a short buffer after the last write settles, since
-      // Firestore's own listener can fire a moment after the write promise resolves.
-      mainSuppressSettleUntil = Date.now() + 2500;
-    }
+    endSave("main");
   });
   return true;
 }
 function persistStudents(){
   cacheLocally();
-  suppressSnapshotsFor("students");
-  fsdb.collection("appdata").doc("students").set(sanitizeForFirestore({ list: STUDENTS })).catch(err=>{
-    console.error("Firestore save failed:", err);
-  });
+  beginSave("students");
+  fsdb.collection("appdata").doc("students").set(sanitizeForFirestore({ list: STUDENTS }))
+    .catch(err=>{ console.error("Firestore save failed:", err); })
+    .then(()=> endSave("students"));
   return true;
 }
 function persistTeachers(){
   cacheLocally();
-  suppressSnapshotsFor("teachers");
-  fsdb.collection("appdata").doc("teachers").set(sanitizeForFirestore({ list: TEACHERS })).catch(err=>{
-    console.error("Firestore save failed:", err);
-  });
+  beginSave("teachers");
+  fsdb.collection("appdata").doc("teachers").set(sanitizeForFirestore({ list: TEACHERS }))
+    .catch(err=>{ console.error("Firestore save failed:", err); })
+    .then(()=> endSave("teachers"));
   return true;
 }
 // Targeted field update — used for class assignments, since many teachers can be
@@ -447,15 +438,17 @@ function saveTeacherAssignment(teacherId, classKeyOrNull){
   if(classKeyOrNull===null || classKeyOrNull===undefined){ deleteFromDB("teacherAssignments", teacherId); }
   else { DB.teacherAssignments[teacherId] = classKeyOrNull; }
   cacheLocally();
-  suppressSnapshotsFor("main");
+  beginSave("main");
   const fieldPath = "teacherAssignments." + teacherId;
   const update = {};
   if(classKeyOrNull===null || classKeyOrNull===undefined){ update[fieldPath] = firebase.firestore.FieldValue.delete(); }
   else { update[fieldPath] = classKeyOrNull; }
-  fsdb.collection("appdata").doc("main").update(update).catch(err=>{
-    console.error("Targeted assignment update failed, falling back to full save:", err);
-    saveDB();
-  });
+  fsdb.collection("appdata").doc("main").update(update)
+    .catch(err=>{
+      console.error("Targeted assignment update failed, falling back to full save:", err);
+      saveDB();
+    })
+    .then(()=> endSave("main"));
 }
 // Associate Class Teacher — a second teacher who can fill/edit the same class's marks
 // (e.g. when the main Class Teacher is absent). Both see and can edit the same result sheet.
@@ -464,15 +457,17 @@ function saveAssociateAssignment(teacherId, classKeyOrNull){
   if(classKeyOrNull===null || classKeyOrNull===undefined){ deleteFromDB("associateAssignments", teacherId); }
   else { DB.associateAssignments[teacherId] = classKeyOrNull; }
   cacheLocally();
-  suppressSnapshotsFor("main");
+  beginSave("main");
   const fieldPath = "associateAssignments." + teacherId;
   const update = {};
   if(classKeyOrNull===null || classKeyOrNull===undefined){ update[fieldPath] = firebase.firestore.FieldValue.delete(); }
   else { update[fieldPath] = classKeyOrNull; }
-  fsdb.collection("appdata").doc("main").update(update).catch(err=>{
-    console.error("Targeted associate-assignment update failed, falling back to full save:", err);
-    saveDB();
-  });
+  fsdb.collection("appdata").doc("main").update(update)
+    .catch(err=>{
+      console.error("Targeted associate-assignment update failed, falling back to full save:", err);
+      saveDB();
+  })
+    .then(()=> endSave("main"));
 }
 
 function effectiveHomeVideo(){ return DB.homeVideo || DEFAULT_HOME_VIDEO || ""; }
@@ -486,6 +481,30 @@ function nextRollFor(cls, sec){
   });
   const n = (nums.length?Math.max(...nums):0) + 1;
   return `${cls}${sec}${String(n).padStart(2,"0")}`;
+}
+// Moving a student to a Roll No that's already taken (within the same class+section)
+// shifts everyone between the old and new position by one, instead of just blocking
+// the edit — so inserting someone at position 5 doesn't mean re-numbering all 20
+// students by hand.
+function shiftRollsToInsert(student, cls, section, targetRoll){
+  const numOf = (roll)=>{ const m = roll.match(/(\d+)$/); return m?parseInt(m[1],10):null; };
+  const prefixOf = (roll)=>{ const m = roll.match(/^(.*?)(\d+)$/); return m?m[1]:roll; };
+  const oldNum = numOf(student.roll), newNum = numOf(targetRoll);
+  if(oldNum===null || newNum===null || oldNum===newNum) return;
+  const padMatch = targetRoll.match(/(\d+)$/);
+  const pad = padMatch ? padMatch[1].length : 2;
+  const others = STUDENTS.filter(s=>s!==student && s.cls===cls && s.section===section);
+  if(newNum < oldNum){
+    // Moving to an earlier position: everyone from the new slot up to (but not
+    // including) the old slot moves one step later to make room.
+    others.filter(s=>{ const n=numOf(s.roll); return n!==null && n>=newNum && n<oldNum; })
+      .forEach(s=>{ const n=numOf(s.roll); s.roll = prefixOf(s.roll)+String(n+1).padStart(pad,"0"); });
+  } else {
+    // Moving to a later position: everyone after the old slot up to the new slot
+    // moves one step earlier to close the gap.
+    others.filter(s=>{ const n=numOf(s.roll); return n!==null && n>oldNum && n<=newNum; })
+      .forEach(s=>{ const n=numOf(s.roll); s.roll = prefixOf(s.roll)+String(n-1).padStart(pad,"0"); });
+  }
 }
 function promoteStudents(classKey, selectedRolls){
   const cls = classKey.split("-")[0], section = classKey.split("-")[1];
@@ -4668,9 +4687,20 @@ function renderAdminStudentPanel(panelTabs){
 
       if(editing){
         if(!rollInput){ errEl.textContent="Roll No cannot be empty."; return; }
-        if(rollInput !== editing.roll && STUDENTS.find(s=>s.roll===rollInput)){
-          errEl.textContent = "That Roll No is already used by another student.";
-          return;
+        if(rollInput !== editing.roll){
+          const clash = STUDENTS.find(s=>s.roll===rollInput);
+          if(clash){
+            if(clash.cls===cls && clash.section===section){
+              // Same class — shift everyone between the old and new position by one,
+              // instead of blocking the edit, so this student can be inserted at the
+              // requested Roll No without re-numbering the whole class by hand.
+              if(!confirm(`Roll No ${rollInput} is already used by ${clash.name}. Insert ${name} there and shift the other students' Roll Nos by one to make room?`)) return;
+              shiftRollsToInsert(editing, cls, section, rollInput);
+            } else {
+              errEl.textContent = "That Roll No is already used by another student in a different class.";
+              return;
+            }
+          }
         }
         editing.roll = rollInput;
         editing.cls = cls; editing.section = section; editing.name = name;
