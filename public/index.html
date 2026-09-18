@@ -342,6 +342,7 @@ function defaultDB(){
     homeVideo:null, homeSlides:{}, homeSlideCounter:0,
     principalProfile: {},
     subjectsByClass: {},
+    electivesLocked: {},
     classEditRequests: {},
     socialLinks: {},
     currentSession: "2026-27",
@@ -2167,9 +2168,23 @@ function renderTeacherDash(){
         <div class="error" id="bulkImportErr"></div>
         <div class="success" id="bulkImportOk"></div>
       </div>` : ""}
-      ${roster.length && electiveGroupsForClass(classKey).length ? `
+      ${roster.length && electiveGroupsForClass(classKey).length ? (()=>{
+        const isLocked = DB.electivesLocked && DB.electivesLocked[classKey];
+        if(isLocked){
+          const summary = electiveGroupsForClass(classKey).map(g=>{
+            const groupKey = g.join("|");
+            const counts = g.map(sub=>`${sub}: ${roster.filter(s=>s.electives && s.electives[groupKey]===sub).length}`).join(", ");
+            return `<div>${g.join(" / ")} → ${counts}</div>`;
+          }).join("");
+          return `
+          <div class="locked-note" style="margin-top:10px;">
+            <b>🔒 Electives are locked</b> for ${classLabel(classKey)} — the table below is fixed to whatever each student was set to. ${summary}
+            <br><button class="btn btn-outline btn-sm" id="unlockElectivesBtn" style="margin-top:6px;">Unlock to Edit Electives</button>
+          </div>`;
+        }
+        return `
       <div class="locked-note" style="margin-top:10px;">
-        <b>🎓 Set Student Electives</b> — pick which subject each student actually takes in each group below (e.g. Biology / Accountancy / Geography). Only their chosen subject will be open for marks; the rest show "N/A". Saves automatically.
+        <b>🎓 Set Student Electives</b> — pick which subject each student actually takes in each group below. Only their chosen subject will be open for marks; the rest show "N/A". Saves automatically and carries over to every future exam for that student — you only need to do this once per student, then use "Lock" below so it doesn't need re-checking every time.
       </div>
       <div class="scrollbox" style="margin-top:8px;max-height:none;overflow-y:visible;">
         <table>
@@ -2184,7 +2199,8 @@ function renderTeacherDash(){
           }).join("")}</tr>`).join("")}
         </table>
       </div>
-      ` : ""}
+      <button class="btn btn-primary btn-sm" id="lockElectivesBtn" style="margin-top:8px;">🔒 Lock Electives for ${classLabel(classKey)}</button>`;
+      })() : ""}
       ${roster.length ? `
       <div class="scrollbox" style="margin-top:10px;max-height:none;overflow-y:visible;">
         <table>
@@ -2208,6 +2224,19 @@ function renderTeacherDash(){
       render();
     };
   });
+  const lockElBtn = document.getElementById("lockElectivesBtn");
+  if(lockElBtn) lockElBtn.onclick=()=>{
+    if(!DB.electivesLocked) DB.electivesLocked = {};
+    DB.electivesLocked[classKey] = true;
+    saveDB();
+    render();
+  };
+  const unlockElBtn = document.getElementById("unlockElectivesBtn");
+  if(unlockElBtn) unlockElBtn.onclick=()=>{
+    deleteFromDB("electivesLocked", classKey);
+    saveDB();
+    render();
+  };
   const tabMkBtn = document.getElementById("tabMarks"); if(tabMkBtn) tabMkBtn.onclick=()=>{ teacherPanel="marks"; render(); };
   document.getElementById("tabLeave").onclick=()=>{ teacherPanel="leave"; render(); };
   const tabBlogBtn = document.getElementById("tabBlog"); if(tabBlogBtn) tabBlogBtn.onclick=()=>{ teacherPanel="blog"; render(); };
