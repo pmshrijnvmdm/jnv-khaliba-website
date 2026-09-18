@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>PM SHRI JNV Surguja — Result Portal</title>
+<title>JNV Surguja</title>
 <link rel="manifest" href="manifest.json">
 <meta name="theme-color" content="#0B2A4A">
 <link rel="icon" href="icon-192.png">
@@ -2827,7 +2827,8 @@ function renderTeacherSubjectMarksPanel(t, panelTabs){
   const outOfInp = document.getElementById("subjOutOf");
   if(outOfInp) outOfInp.onchange=(e)=>{
     const subjObj = rr.subjects.find(s=>s.name===subjMarksSubject);
-    const newMax = Number(e.target.value)||100;
+    const typedVal = e.target.value.trim();
+    const newMax = (typedVal==="" || isNaN(Number(typedVal))) ? 100 : Number(typedVal);
     const roster = studentsForClass(subjMarksClass);
     const overLimit = roster.filter(s=>{
       const v = markFor(rr, s.roll, subjMarksSubject);
@@ -3787,9 +3788,18 @@ function renderPrincipalDash(){
         detailHtml = `<p class="locked-note">Class teacher has not started this exam yet.</p>`;
       } else {
         const roster = studentsForClass(classKey);
-        const subjHeaders = rr.subjects.map(s=>{
+        const editable = rr.status !== "published"; // Unpublish first to fix a live result
+        const subjHeaders = rr.subjects.map((s,si)=>{
           const inactive = Number(s.maxMarks)===0;
-          return `<th style="${inactive?'opacity:0.5;':''}">${s.name}<br><span style="font-weight:400;font-size:10.5px;">${inactive?'Not held':'/ '+s.maxMarks}</span></th>`;
+          return `<th style="${inactive?'opacity:0.5;':''}">${s.name}<br>
+            <span style="font-weight:400;font-size:10.5px;">out of
+              ${editable
+                ? `<input class="padmin-maxmarks-box" data-si="${si}" type="number" min="0" value="${s.maxMarks}" style="width:44px;padding:3px 4px;">
+                   <button class="btn btn-outline btn-sm" data-padmin-savemax="${si}" type="button" style="font-size:9px;padding:1px 4px;">Set</button>`
+                : (inactive?'Not held':'/ '+s.maxMarks)}
+            </span>
+            ${editable ? `<br><span class="padmin-maxmarks-confirm" data-si-confirm="${si}" style="font-size:9px;color:var(--muted);">currently: ${s.maxMarks}</span>` : ""}
+          </th>`;
         }).join("");
         const ranksAndGrades2 = classRanksAndGrades(classKey, rr);
         const rows2 = roster.map(s=>{
@@ -3797,7 +3807,8 @@ function renderPrincipalDash(){
             if(Number(sub.maxMarks)===0) return `<td style="background:#f2f2f2;text-align:center;color:var(--muted);">—</td>`;
             if(!studentTakesSubject(s, classKey, sub.name)) return `<td style="background:#f2f2f2;text-align:center;color:var(--muted);">N/A</td>`;
             const m = markFor(rr, s.roll, sub.name);
-            return `<td>${m!==""&&m!=null?m:"—"}</td>`;
+            if(!editable) return `<td>${m!==""&&m!=null?m:"—"}</td>`;
+            return `<td><input class="padmin-mark-box" data-roll="${s.roll}" data-subject="${sub.name}" type="number" min="0" max="${sub.maxMarks}" value="${m}" style="width:56px;"></td>`;
           }).join("");
           const ov = studentOverall(rr, s.roll);
           const rg = ranksAndGrades2[s.roll];
@@ -3805,7 +3816,7 @@ function renderPrincipalDash(){
         }).join("");
         let actions;
         if(rr.status==="draft"){
-          actions = `<span style="font-size:12.5px;color:var(--muted)">Still in draft — not yet submitted by class teacher.</span>`;
+          actions = `<span style="font-size:12.5px;color:var(--muted)">Still in draft — not yet submitted by class teacher. You can already fix marks above if needed.</span>`;
         } else if(rr.status==="submitted"){
           actions = `
             ${rr.editRequested?`<div style="margin-bottom:8px;font-size:12.5px;color:var(--red);font-weight:600;">⚠ ${rr.enteredBy||"Class teacher"} has requested an edit.</div>`:""}
@@ -3817,7 +3828,8 @@ function renderPrincipalDash(){
         detailHtml = `
           <div style="margin-top:16px;border-top:1px solid var(--line);padding-top:16px;">
             <h4 style="color:var(--navy)">${examLabel(principalSelectedExamKey)} — All Subjects</h4>
-            <div class="scrollbox"><table><tr><th>Photo</th><th>Roll</th><th>Name</th>${subjHeaders}<th>Overall %</th><th>Rank</th><th>Grade</th></tr>${rows2}</table></div>
+            ${editable ? `<div class="locked-note">You can edit marks and "Out of" directly here — no need to Unlock first unless you want the Class Teacher to fix it themselves.</div>` : ""}
+            <div class="scrollbox" style="max-height:none;overflow-y:visible;"><table><tr><th>Photo</th><th>Roll</th><th>Name</th>${subjHeaders}<th>Overall %</th><th>Rank</th><th>Grade</th></tr>${rows2}</table></div>
             <div style="margin-top:10px;">${actions}</div>
             <div class="hist">${rr.history.length? "<b>History:</b><br>"+rr.history.join("<br>") : ""}</div>
           </div>
@@ -3864,10 +3876,56 @@ function renderPrincipalDash(){
   const unpubBtn=document.getElementById("unpublish");
   if(unpubBtn) unpubBtn.onclick=()=>{
     const rr = DB.results[resultKey(principalSelectedClassKey, principalSelectedExamKey)];
-    rr.status="submitted";
-    log(rr, "Result unpublished by Principal "+currentActor().name);
+    // Go straight to "draft" (not "submitted") — this immediately re-opens the marks
+    // table for the Class Teacher too, in one step. Sending it only to "submitted"
+    // left the Class Teacher's own table still locked (it only unlocks at "draft"),
+    // forcing a confusing second round-trip: Class Teacher would have to separately
+    // click "Request Edit", and Principal would have to click "Unlock" again, just
+    // to fix a mistake Principal had already decided to reopen.
+    rr.status="draft"; rr.editRequested=false;
+    log(rr, "Result unpublished by Principal "+currentActor().name+" — reopened for editing");
     saveDB(); render();
   };
+
+  document.querySelectorAll(".padmin-mark-box").forEach(inp=>{
+    inp.oninput=(e)=>{
+      const rr = DB.results[resultKey(principalSelectedClassKey, principalSelectedExamKey)];
+      const maxM = Number(e.target.max);
+      const val = e.target.value.trim();
+      const valid = val==="" || (!isNaN(Number(val)) && Number(val)>=0 && Number(val)<=maxM);
+      if(!valid){
+        e.target.style.border = "2px solid var(--red)";
+        e.target.title = `Invalid — must be between 0 and ${maxM} (Out of ${maxM})`;
+        return;
+      }
+      e.target.style.border = "";
+      e.target.title = "";
+      setMarkFor(rr, e.target.dataset.roll, e.target.dataset.subject, val);
+      if(!rr.subjectEditors) rr.subjectEditors = {};
+      rr.subjectEditors[e.target.dataset.subject] = currentActor().name;
+      saveDB();
+    };
+  });
+  document.querySelectorAll(".padmin-maxmarks-box").forEach(inp=>{
+    inp.oninput=(e)=>{
+      const label = document.querySelector(`.padmin-maxmarks-confirm[data-si-confirm="${e.target.dataset.si}"]`);
+      if(label) label.textContent = "typed: " + (e.target.value || "(empty)");
+    };
+  });
+  document.querySelectorAll("[data-padmin-savemax]").forEach(btn=>{
+    btn.onclick=()=>{
+      const rr = DB.results[resultKey(principalSelectedClassKey, principalSelectedExamKey)];
+      const si = Number(btn.dataset.padminSavemax);
+      const inp = document.querySelector(`.padmin-maxmarks-box[data-si="${si}"]`);
+      const v = inp.value.trim();
+      const newVal = (v==="" || isNaN(Number(v))) ? 100 : Number(v);
+      rr.subjects[si].maxMarks = newVal;
+      saveDB();
+      const label = document.querySelector(`.padmin-maxmarks-confirm[data-si-confirm="${si}"]`);
+      if(label) label.textContent = "✅ saved: " + newVal;
+      setTimeout(render, 600);
+    };
+  });
 }
 
 /* ---------------- PRINCIPAL: LEAVE REQUESTS PANEL ---------------- */
