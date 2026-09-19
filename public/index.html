@@ -343,6 +343,7 @@ function defaultDB(){
     principalProfile: {},
     subjectsByClass: {},
     electivesLocked: {},
+    attendanceLocked: {},
     classEditRequests: {},
     socialLinks: {},
     currentSession: "2026-27",
@@ -406,14 +407,39 @@ function deleteFromDB(topKey, subKey){
   if(DB[topKey]) delete DB[topKey][subKey];
   pendingDeletions.push({topKey, subKey});
 }
+// Recursively merges server data under local data: for any key present on both sides
+// where BOTH values are plain objects (not arrays), merge one level deeper instead of
+// letting local's whole object replace server's. Applied to something like `results`,
+// this means an edit to Class 6-A's sheet won't clobber a concurrent edit to Class
+// 7-B's sheet sitting in the same top-level dict — and going deeper still, one
+// teacher's just-saved mark for one student/subject won't wipe another teacher's
+// concurrently-saved mark for a *different* student/subject in the very same sheet,
+// since `.marks` (a dict of roll → dict of subject → value) merges all the way down
+// to individual values. Arrays (e.g. a sheet's `.subjects` list) are NOT merged this
+// way — whichever side is "local" for that call simply replaces the array outright,
+// since array entries don't have natural per-key merge semantics.
+function deepMergeForSave(serverVal, localVal){
+  const bothPlainObjects = serverVal && localVal
+    && typeof serverVal==="object" && typeof localVal==="object"
+    && !Array.isArray(serverVal) && !Array.isArray(localVal);
+  if(!bothPlainObjects) return localVal;
+  const merged = {...serverVal};
+  Object.keys(localVal).forEach(k=>{
+    merged[k] = deepMergeForSave(serverVal[k], localVal[k]);
+  });
+  return merged;
+}
 function saveDB(){
   cacheLocally();
   beginSave("main");
   // Fetch-then-merge before writing: if another device saved something (a published
   // result, a new notice, etc.) that hasn't synced to this tab yet, a blind overwrite
-  // here would silently erase it. Instead, merge dictionary-shaped fields (results,
-  // notices, leaveRequests, etc.) at the record level — this tab's own edits win for
-  // any record it touched, but anything added elsewhere in the meantime is kept.
+  // here would silently erase it. deepMergeForSave() merges every nested dict-shaped
+  // field all the way down (see its comment above) rather than just the top level —
+  // this tab's own edits win for exactly what it touched, and nothing concurrently
+  // saved elsewhere (a different class's marks, a different subject's mark, a
+  // different teacher's attendance) gets overwritten just because it happened to
+  // live inside the same top-level Firestore field.
   //
   // Calls are chained (not fired in parallel): if several edits happen in quick
   // succession (e.g. setting "Out of", then a mark, then Submit), each save must see
@@ -427,15 +453,11 @@ function saveDB(){
       const snap = await fsdb.collection("appdata").doc("main").get();
       if(snap.exists){
         const server = snap.data();
-        const merged = {...server};
-        Object.keys(pendingDB).forEach(key=>{
-          const localVal = pendingDB[key], serverVal = server[key];
-          const bothPlainObjects = localVal && typeof localVal==="object" && !Array.isArray(localVal)
-            && serverVal && typeof serverVal==="object" && !Array.isArray(serverVal);
-          merged[key] = bothPlainObjects ? {...serverVal, ...localVal} : localVal;
-        });
+        const merged = deepMergeForSave(server, pendingDB);
         // Re-apply any deletions this call made — a union-merge alone would otherwise
-        // resurrect them from the server's (older, pre-deletion) copy.
+        // resurrect them from the server's (older, pre-deletion) copy. Deletions can
+        // be nested two levels deep (topKey.subKey) or, for a result's own marks/
+        // subjectLocked maps, effectively arbitrary depth — walk to the right spot.
         myDeletions.forEach(({topKey,subKey})=>{ if(merged[topKey]) delete merged[topKey][subKey]; });
         DB = merged;
       }
@@ -846,6 +868,7 @@ function studentTakesSubject(student, classKey, subjectName){
   if(!group) return true; // not part of any elective group — a subject everyone takes
   const chosen = student.electives && student.electives[group.join("|")];
   if(!chosen) return true; // no choice recorded yet — don't hide it until one is set
+  if(chosen==="BOTH") return true; // rare case: this student takes every subject in the group
   return chosen === subjectName;
 }
 // Try to find the official time-table subject label matching a teacher's subject, for a given class.
@@ -893,15 +916,40 @@ function setMarkFor(r, roll, subjectName, value){
   if(!r.marks[roll]) r.marks[roll] = {};
   r.marks[roll][subjectName] = value;
 }
+function standardSubjectCountForClass(classKey){
+  // The number of subjects a "normal" student in this class takes: every fixed
+  // (non-elective) subject, plus exactly one choice per elective group. Used so a
+  // rare student who's been allowed to take BOTH options in a group (e.g. Maths AND
+  // Biology) still gets ranked/graded on their best N subjects, not N+1 — the extra
+  // subject can only help them, never count against classmates taking the normal load.
+  const allSubjects = subjectsForClass(classKey);
+  const groups = electiveGroupsForClass(classKey);
+  const electiveSubjectsFlat = groups.flat();
+  const fixedCount = allSubjects.filter(s=>!electiveSubjectsFlat.includes(s)).length;
+  return fixedCount + groups.length;
+}
 function studentOverall(r, roll){
-  let scored=0, max=0;
   const student = STUDENTS.find(s=>s.roll===roll);
+  const perSubject = [];
   r.subjects.forEach(s=>{
     if(Number(s.maxMarks)===0) return; // "Out of" set to 0 = subject not held for this exam
     if(student && r.classKey && !studentTakesSubject(student, r.classKey, s.name)) return; // not this student's elective
     const v = markFor(r, roll, s.name);
-    if(v!==""&&v!=null){ scored += Number(v); max += Number(s.maxMarks||100); }
+    if(v!==""&&v!=null){
+      const sc = Number(v), mx = Number(s.maxMarks||100);
+      perSubject.push({ scored: sc, max: mx, pct: mx>0 ? sc/mx : 0 });
+    }
   });
+  if(!perSubject.length) return null;
+  // Normally perSubject.length === the standard count and nothing is dropped. Only
+  // when a student has MORE applicable subjects than normal (the "BOTH" exception)
+  // do we keep just their best-scoring N and quietly drop the rest.
+  const standardCount = student && r.classKey ? standardSubjectCountForClass(r.classKey) : perSubject.length;
+  const kept = perSubject.length > standardCount
+    ? [...perSubject].sort((a,b)=> b.pct - a.pct).slice(0, standardCount)
+    : perSubject;
+  let scored=0, max=0;
+  kept.forEach(x=>{ scored += x.scored; max += x.max; });
   return max>0 ? {scored, max, pct: (scored/max*100)} : null;
 }
 // Class rank (Excel-RANK style: ties share a rank, next rank skips ahead) and CBSE-style
@@ -2195,6 +2243,7 @@ function renderTeacherDash(){
             return `<td><select class="stu-elective-inline" data-roll="${s.roll}" data-groupkey="${groupKey}">
               <option value="">— not set —</option>
               ${g.map(sub=>`<option value="${sub}" ${chosen===sub?"selected":""}>${sub}</option>`).join("")}
+              <option value="BOTH" ${chosen==="BOTH"?"selected":""}>Both (${g.join(" + ")}) — rare exception</option>
             </select></td>`;
           }).join("")}</tr>`).join("")}
         </table>
@@ -2904,18 +2953,28 @@ function renderTeacherSubjectMarksPanel(t, panelTabs){
 function renderTeacherAttendancePanel(t, panelTabs, classKey, isAssociate){
   const roster = studentsForClass(classKey);
   const att = getClassAttendance(classKey);
+  const isLocked = DB.attendanceLocked && DB.attendanceLocked[classKey];
 
-  const monthHeaders = ATTENDANCE_MONTHS.map(m=>`<th>${m}</th>`).join("");
-  const workingDaysRow = ATTENDANCE_MONTHS.map(m=>
-    `<td><input class="wd-box" data-month="${m}" type="number" min="0" max="31" value="${att.workingDays[m]}" style="width:52px;padding:3px 4px;"></td>`
-  ).join("");
+  const activeMonths = ATTENDANCE_MONTHS.filter(m=>Number(att.workingDays[m])!==0);
+  const monthHeaders = ATTENDANCE_MONTHS.map(m=>{
+    const inactive = Number(att.workingDays[m])===0;
+    return `<th style="${inactive?'opacity:0.5;':''}">${m}${inactive?'<br><span style="font-size:9px;color:var(--red);">No classes</span>':''}</th>`;
+  }).join("");
+  const workingDaysRow = ATTENDANCE_MONTHS.map(m=>{
+    const inactive = Number(att.workingDays[m])===0;
+    return `<td>${inactive || isLocked
+      ? `<input class="wd-box" data-month="${m}" type="number" min="0" max="31" value="${att.workingDays[m]}" style="width:52px;padding:3px 4px;" ${isLocked?"disabled":""}>`
+      : `<input class="wd-box" data-month="${m}" type="number" min="0" max="31" value="${att.workingDays[m]}" style="width:52px;padding:3px 4px;">`}</td>`;
+  }).join("");
 
   const rows = roster.map(s=>{
     const row = studentAttendanceRow(classKey, s.roll);
     const totals = attendanceTotals(classKey, s.roll);
-    const cells = ATTENDANCE_MONTHS.map(m=>
-      `<td><input class="att-box" data-roll="${s.roll}" data-month="${m}" type="number" min="0" max="${att.workingDays[m]}" value="${row[m]!=null?row[m]:""}" style="width:52px;"></td>`
-    ).join("");
+    const cells = ATTENDANCE_MONTHS.map(m=>{
+      const inactive = Number(att.workingDays[m])===0;
+      if(inactive) return `<td style="background:#f2f2f2;text-align:center;color:var(--muted);">—</td>`;
+      return `<td><input class="att-box" data-roll="${s.roll}" data-month="${m}" type="number" min="0" max="${att.workingDays[m]}" value="${row[m]!=null?row[m]:""}" style="width:52px;" ${isLocked?"disabled":""}></td>`;
+    }).join("");
     return `<tr><td>${s.roll}</td><td>${s.name}</td>${cells}<td><b>${totals.present}</b></td><td>${totals.working}</td><td><b>${totals.pct.toFixed(1)}%</b></td></tr>`;
   }).join("");
 
@@ -2924,12 +2983,19 @@ function renderTeacherAttendancePanel(t, panelTabs, classKey, isAssociate){
     <div class="card">
       ${teacherHeaderHtml(t, t.designation+" · "+(isAssociate?"Associate Class Teacher":"Class Teacher")+": <b>"+classLabel(classKey)+"</b>")}
       ${panelTabs}
-      <div class="locked-note">Enter the number of days <b>present</b> for each student, month by month. Working days per month can be adjusted if a month had holidays/exams.</div>
+      <div class="locked-note">
+        Enter the number of days <b>present</b> for each student, month by month. Working days per month can be adjusted if a month had holidays/exams — set a month's "Working Days" to <b>0</b> if no classes were held at all that month, and it's greyed out and skipped everywhere.
+      </div>
       <p style="margin:10px 0;">
-        ${ATTENDANCE_SHEET_TAB_NAMES[classKey] ? `<button class="btn btn-primary btn-sm" id="syncAttBtn">🔄 Sync from Master Sheet</button>` : ""}
+        ${ATTENDANCE_SHEET_TAB_NAMES[classKey] && !isLocked ? `<button class="btn btn-primary btn-sm" id="syncAttBtn">🔄 Sync from Master Sheet</button>` : ""}
       </p>
       <div class="error" id="syncAttErr"></div>
       <div class="success" id="syncAttOk"></div>
+      ${isLocked ? `
+        <div class="locked-note" style="border-color:var(--navy);background:#eef3fb;">
+          <b>🔒 Attendance is locked</b> for ${classLabel(classKey)} — nothing here can be changed by accident. <button class="btn btn-outline btn-sm" id="unlockAttBtn" style="margin-left:8px;">Unlock to Edit</button>
+        </div>
+      ` : `<button class="btn btn-primary btn-sm" id="lockAttBtn" style="margin-bottom:10px;">🔒 Lock Attendance for ${classLabel(classKey)}</button>`}
       <div class="scrollbox">
         <table>
           <tr><th>Roll</th><th>Name</th>${monthHeaders}<th>Total Present</th><th>Total Working</th><th>%</th></tr>
@@ -2963,9 +3029,26 @@ function renderTeacherAttendancePanel(t, panelTabs, classKey, isAssociate){
   document.getElementById("tabAccount").onclick=()=>{ teacherPanel="account"; render(); };
   document.getElementById("tabAttendance").onclick=()=>{ teacherPanel="attendance"; render(); };
 
+  const lockAttBtn = document.getElementById("lockAttBtn");
+  if(lockAttBtn) lockAttBtn.onclick=()=>{
+    if(!DB.attendanceLocked) DB.attendanceLocked = {};
+    DB.attendanceLocked[classKey] = true;
+    saveDB();
+    render();
+  };
+  const unlockAttBtn = document.getElementById("unlockAttBtn");
+  if(unlockAttBtn) unlockAttBtn.onclick=()=>{
+    deleteFromDB("attendanceLocked", classKey);
+    saveDB();
+    render();
+  };
+
   document.querySelectorAll(".wd-box").forEach(inp=>{
     inp.onchange=(e)=>{
-      att.workingDays[e.target.dataset.month] = Number(e.target.value)||25;
+      const v = e.target.value.trim();
+      // "0" means "no classes at all this month" and must stick as 0, not fall back
+      // to a default — only truly empty/invalid input should default (to 25).
+      att.workingDays[e.target.dataset.month] = (v==="" || isNaN(Number(v))) ? 25 : Number(v);
       saveDB(); render();
     };
   });
@@ -4921,15 +5004,16 @@ function renderAdminStudentPanel(panelTabs){
       </select>
       <label>Admission No. (optional)</label>
       <input id="stuAdmno" value="${editing?editing.admno:""}" placeholder="Admission number">
-      ${editing && (editing.cls==="11"||editing.cls==="12") ? `
-        <label style="margin-top:10px;display:block;">Elective Subjects (Class 11/12 only)</label>
+      ${editing && electiveGroupsForClass(editing.cls+"-"+editing.section).length ? `
+        <label style="margin-top:10px;display:block;">Elective Subjects</label>
         <p style="font-size:11.5px;color:var(--muted);margin:-2px 0 6px;">Pick which subject this student actually takes in each group — the others won't show up for them in results/marks.</p>
-        ${electiveGroupsForClass(editing.cls+"-A").map((group,gi)=>{
+        ${electiveGroupsForClass(editing.cls+"-"+editing.section).map((group,gi)=>{
           const groupKey = group.join("|");
           const chosen = editing.electives && editing.electives[groupKey];
           return `<select class="stu-elective-select" data-groupkey="${groupKey}" style="margin-bottom:6px;">
             <option value="">${group.join(" / ")} — not set</option>
             ${group.map(sub=>`<option value="${sub}" ${chosen===sub?"selected":""}>${sub}</option>`).join("")}
+            <option value="BOTH" ${chosen==="BOTH"?"selected":""}>Both (${group.join(" + ")}) — rare exception</option>
           </select>`;
         }).join("")}
       ` : ""}
