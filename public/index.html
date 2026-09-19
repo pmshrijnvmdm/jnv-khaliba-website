@@ -398,6 +398,20 @@ function sanitizeForFirestore(obj){
 
 let saveDBChain = Promise.resolve();
 let pendingDeletions = [];
+// Precise dirty-tracking, generalized to any top-level dict-shaped DB field (results,
+// subjectsByClass, classEditRequests, electivesLocked, attendanceLocked, ...): a plain
+// deep-merge on these caused a much worse bug than the one it was meant to fix, since
+// every session keeps a FULL copy of the whole DB in memory. A session that hasn't
+// refreshed in a while can still be holding a STALE copy of some entry someone else
+// has since changed (a published result reverted to draft, a subject list someone
+// else edited reverting back, etc.) — saving ANYTHING at all, even something totally
+// unrelated, would deep-merge that stale copy back in and silently undo it. The fix:
+// track exactly which (topKey, subKey) entries THIS session actually, intentionally
+// touched, via markDirty(), and only let local's copy of THOSE win; everything else
+// always comes straight from the server, no matter what a stale in-memory copy says.
+let dirtyPaths = []; // { topKey, subKey }
+function markDirty(topKey, subKey){ dirtyPaths.push({topKey, subKey}); }
+function markResultDirty(resultKeyStr){ markDirty("results", resultKeyStr); }
 function deleteFromDB(topKey, subKey){
   // Use this instead of `delete DB.xxx[key]` directly. The safety-merge in saveDB()
   // re-fetches the server copy before writing (to protect concurrent edits elsewhere),
@@ -407,17 +421,12 @@ function deleteFromDB(topKey, subKey){
   if(DB[topKey]) delete DB[topKey][subKey];
   pendingDeletions.push({topKey, subKey});
 }
-// Recursively merges server data under local data: for any key present on both sides
-// where BOTH values are plain objects (not arrays), merge one level deeper instead of
-// letting local's whole object replace server's. Applied to something like `results`,
-// this means an edit to Class 6-A's sheet won't clobber a concurrent edit to Class
-// 7-B's sheet sitting in the same top-level dict — and going deeper still, one
-// teacher's just-saved mark for one student/subject won't wipe another teacher's
-// concurrently-saved mark for a *different* student/subject in the very same sheet,
-// since `.marks` (a dict of roll → dict of subject → value) merges all the way down
-// to individual values. Arrays (e.g. a sheet's `.subjects` list) are NOT merged this
-// way — whichever side is "local" for that call simply replaces the array outright,
-// since array entries don't have natural per-key merge semantics.
+// Fallback merge for any top-level field that ISN'T covered by explicit dirty-path
+// tracking above (e.g. simple non-dict fields like `currentSession`, or a dict field
+// nobody has retrofitted precise tracking for yet). Recursively merges server data
+// under local data one level at a time — better than a blind top-level replace, but
+// still vulnerable to the stale-copy problem explained above for anything frequently
+// edited, which is exactly why the fields that need it use markDirty() instead.
 function deepMergeForSave(serverVal, localVal){
   const bothPlainObjects = serverVal && localVal
     && typeof serverVal==="object" && typeof localVal==="object"
@@ -434,12 +443,7 @@ function saveDB(){
   beginSave("main");
   // Fetch-then-merge before writing: if another device saved something (a published
   // result, a new notice, etc.) that hasn't synced to this tab yet, a blind overwrite
-  // here would silently erase it. deepMergeForSave() merges every nested dict-shaped
-  // field all the way down (see its comment above) rather than just the top level —
-  // this tab's own edits win for exactly what it touched, and nothing concurrently
-  // saved elsewhere (a different class's marks, a different subject's mark, a
-  // different teacher's attendance) gets overwritten just because it happened to
-  // live inside the same top-level Firestore field.
+  // here would silently erase it.
   //
   // Calls are chained (not fired in parallel): if several edits happen in quick
   // succession (e.g. setting "Out of", then a mark, then Submit), each save must see
@@ -448,12 +452,34 @@ function saveDB(){
   const pendingDB = DB; // snapshot of what THIS call should end up persisting
   const myDeletions = pendingDeletions;
   pendingDeletions = [];
+  const myDirty = dirtyPaths;
+  dirtyPaths = [];
   saveDBChain = saveDBChain.then(async ()=>{
     try{
       const snap = await fsdb.collection("appdata").doc("main").get();
       if(snap.exists){
         const server = snap.data();
         const merged = deepMergeForSave(server, pendingDB);
+        // Override the deep-merge's handling of any field with explicit dirty-path
+        // entries: start from the SERVER's copy of every entry in that field, and
+        // only let local's version win for entries THIS save actually marked dirty.
+        // This is what stops a stale in-memory copy of some other class's sheet (or
+        // some other class's subject list, etc.) from silently reverting it when
+        // this session saves something unrelated.
+        const dirtyByTopKey = {};
+        myDirty.forEach(({topKey, subKey})=>{
+          if(!dirtyByTopKey[topKey]) dirtyByTopKey[topKey] = new Set();
+          dirtyByTopKey[topKey].add(subKey);
+        });
+        Object.keys(dirtyByTopKey).forEach(topKey=>{
+          const precise = {...(server[topKey]||{})};
+          dirtyByTopKey[topKey].forEach(subKey=>{
+            if(pendingDB[topKey] && pendingDB[topKey][subKey]!==undefined){
+              precise[subKey] = pendingDB[topKey][subKey];
+            }
+          });
+          merged[topKey] = precise;
+        });
         // Re-apply any deletions this call made — a union-merge alone would otherwise
         // resurrect them from the server's (older, pre-deletion) copy. Deletions can
         // be nested two levels deep (topKey.subKey) or, for a result's own marks/
@@ -887,6 +913,9 @@ function getResult(classKey, examKey){
   if(!DB.results[k]){
     const subjects = subjectsForClass(classKey).map(name=>({name, maxMarks:100}));
     DB.results[k] = { classKey, examKey, subjects, status:"draft", marks:{}, subjectLocked:{}, enteredBy:"", editRequested:false, history:[] };
+    markResultDirty(k); // a brand-new sheet only exists locally so far — without this,
+    // the save below would treat it as "untouched" and it would never actually reach
+    // the server at all, since the precise results-merge starts from the server's copy.
     saveDB();
   }
   // heal older/partial records
@@ -2277,6 +2306,7 @@ function renderTeacherDash(){
   if(lockElBtn) lockElBtn.onclick=()=>{
     if(!DB.electivesLocked) DB.electivesLocked = {};
     DB.electivesLocked[classKey] = true;
+    markDirty("electivesLocked", classKey);
     saveDB();
     render();
   };
@@ -2320,6 +2350,7 @@ function renderTeacherDash(){
         const v = inp.value.trim();
         const newVal = (v==="" || isNaN(Number(v))) ? 100 : Number(v);
         rNow.subjects[si].maxMarks = newVal;
+        markResultDirty(resultKey(classKey, teacherSelectedExam));
         saveDB();
         const label = document.querySelector(`.maxmarks-confirm[data-si-confirm="${si}"]`);
         if(label) label.textContent = "✅ saved: " + newVal;
@@ -2331,6 +2362,7 @@ function renderTeacherDash(){
         const rNow = getResult(classKey, teacherSelectedExam);
         if(!rNow.subjectLocked) rNow.subjectLocked = {};
         rNow.subjectLocked[btn.dataset.unlocksubj] = false;
+        markResultDirty(resultKey(classKey, teacherSelectedExam));
         saveDB(); render();
       };
     });
@@ -2354,6 +2386,7 @@ function renderTeacherDash(){
         setMarkFor(rNow, e.target.dataset.roll, e.target.dataset.subject, val);
         if(!rNow.subjectEditors) rNow.subjectEditors = {};
         rNow.subjectEditors[e.target.dataset.subject] = t.name;
+        markResultDirty(resultKey(classKey, teacherSelectedExam));
         saveDB();
       };
     });
@@ -2416,6 +2449,7 @@ function renderTeacherDash(){
           setMarkFor(r, stu.roll, subName, val);
         });
       });
+      markResultDirty(resultKey(classKey, teacherSelectedExam));
       saveDB();
       let msg = `Imported marks for ${matched} student(s), ${colToSubject.filter(Boolean).length} subject column(s) matched.`;
       if(unmatchedHeaders.length) msg += " Unmatched subject headers (skipped): "+unmatchedHeaders.join(", ")+".";
@@ -2431,6 +2465,7 @@ function renderTeacherDash(){
       const rNow = getResult(classKey, teacherSelectedExam);
       rNow.status="submitted"; rNow.editRequested=false; rNow.enteredBy=t.name;
       log(rNow, "Full class result SUBMITTED & LOCKED by "+t.name);
+      markResultDirty(resultKey(classKey, teacherSelectedExam));
       saveDB(); render();
     };
   }
@@ -2439,6 +2474,7 @@ function renderTeacherDash(){
     const rNow = getResult(classKey, teacherSelectedExam);
     rNow.editRequested=true;
     log(rNow, "Edit request raised by "+t.name);
+    markResultDirty(resultKey(classKey, teacherSelectedExam));
     saveDB(); render();
   };
 }
@@ -2821,6 +2857,7 @@ async function syncAttendanceFromSheet(classKey){
     });
     updated++;
   }
+  markDirty("attendance", classKey);
   saveDB();
   return updated;
 }
@@ -2922,6 +2959,7 @@ function renderTeacherSubjectMarksPanel(t, panelTabs){
       setMarkFor(rrNow, e.target.dataset.roll, subjMarksSubject, val);
       if(!rrNow.subjectEditors) rrNow.subjectEditors = {};
       rrNow.subjectEditors[subjMarksSubject] = t.name;
+      markResultDirty(resultKey(subjMarksClass, subjMarksExam));
       saveDB();
     };
   });
@@ -2946,6 +2984,7 @@ function renderTeacherSubjectMarksPanel(t, panelTabs){
       overLimit.forEach(s=>{ setMarkFor(rrNow, s.roll, subjMarksSubject, ""); });
     }
     if(subjObj) subjObj.maxMarks = newMax;
+    markResultDirty(resultKey(subjMarksClass, subjMarksExam));
     saveDB();
     render();
   };
@@ -2958,6 +2997,7 @@ function renderTeacherSubjectMarksPanel(t, panelTabs){
     rrNow.subjectLocked[subjMarksSubject] = true;
     if(!rrNow.subjectEditors) rrNow.subjectEditors = {};
     rrNow.subjectEditors[subjMarksSubject] = t.name;
+    markResultDirty(resultKey(subjMarksClass, subjMarksExam));
     saveDB();
     render();
   };
@@ -3046,6 +3086,7 @@ function renderTeacherAttendancePanel(t, panelTabs, classKey, isAssociate){
   if(lockAttBtn) lockAttBtn.onclick=()=>{
     if(!DB.attendanceLocked) DB.attendanceLocked = {};
     DB.attendanceLocked[classKey] = true;
+    markDirty("attendanceLocked", classKey);
     saveDB();
     render();
   };
@@ -3063,6 +3104,7 @@ function renderTeacherAttendancePanel(t, panelTabs, classKey, isAssociate){
       // "0" means "no classes at all this month" and must stick as 0, not fall back
       // to a default — only truly empty/invalid input should default (to 25).
       attNow.workingDays[e.target.dataset.month] = (v==="" || isNaN(Number(v))) ? 25 : Number(v);
+      markDirty("attendance", classKey);
       saveDB(); render();
     };
   });
@@ -3072,6 +3114,7 @@ function renderTeacherAttendancePanel(t, panelTabs, classKey, isAssociate){
       const roll = e.target.dataset.roll, month = e.target.dataset.month;
       if(!attNow.records[roll]) attNow.records[roll] = {};
       attNow.records[roll][month] = e.target.value;
+      markDirty("attendance", classKey);
       saveDB();
     };
   });
@@ -3182,6 +3225,7 @@ function renderTeacherStudentsPanel(t, panelTabs, classKey, isAssociate){
   if(reqBtn) reqBtn.onclick=()=>{
     if(!DB.classEditRequests) DB.classEditRequests = {};
     DB.classEditRequests[classKey] = { status:"requested", requestedBy: t.name, requestedOn: nowStr() };
+    markDirty("classEditRequests", classKey);
     saveDB();
     render();
   };
@@ -3231,6 +3275,7 @@ function renderTeacherStudentsPanel(t, panelTabs, classKey, isAssociate){
       s.house = edits.house; s.gender = edits.gender;
     });
     DB.classEditRequests[classKey] = { status:"none" };
+    markDirty("classEditRequests", classKey);
     if(persistStudents()){
       saveDB();
       render();
@@ -4004,6 +4049,7 @@ function renderPrincipalDash(){
     const rr = DB.results[resultKey(principalSelectedClassKey, principalSelectedExamKey)];
     rr.status="draft"; rr.editRequested=false;
     log(rr, "Unlocked for teacher edit by Principal "+currentActor().name);
+    markResultDirty(resultKey(principalSelectedClassKey, principalSelectedExamKey));
     saveDB(); render();
   };
   const publishBtn=document.getElementById("publish");
@@ -4011,6 +4057,7 @@ function renderPrincipalDash(){
     const rr = DB.results[resultKey(principalSelectedClassKey, principalSelectedExamKey)];
     rr.status="published"; rr.editRequested=false;
     log(rr, "Result PUBLISHED by Principal "+currentActor().name);
+    markResultDirty(resultKey(principalSelectedClassKey, principalSelectedExamKey));
     saveDB(); render();
   };
   const unpubBtn=document.getElementById("unpublish");
@@ -4024,6 +4071,7 @@ function renderPrincipalDash(){
     // to fix a mistake Principal had already decided to reopen.
     rr.status="draft"; rr.editRequested=false;
     log(rr, "Result unpublished by Principal "+currentActor().name+" — reopened for editing");
+    markResultDirty(resultKey(principalSelectedClassKey, principalSelectedExamKey));
     saveDB(); render();
   };
 
@@ -4043,6 +4091,7 @@ function renderPrincipalDash(){
       setMarkFor(rr, e.target.dataset.roll, e.target.dataset.subject, val);
       if(!rr.subjectEditors) rr.subjectEditors = {};
       rr.subjectEditors[e.target.dataset.subject] = currentActor().name;
+      markResultDirty(resultKey(principalSelectedClassKey, principalSelectedExamKey));
       saveDB();
     };
   });
@@ -4060,6 +4109,7 @@ function renderPrincipalDash(){
       const v = inp.value.trim();
       const newVal = (v==="" || isNaN(Number(v))) ? 100 : Number(v);
       rr.subjects[si].maxMarks = newVal;
+      markResultDirty(resultKey(principalSelectedClassKey, principalSelectedExamKey));
       saveDB();
       const label = document.querySelector(`.padmin-maxmarks-confirm[data-si-confirm="${si}"]`);
       if(label) label.textContent = "✅ saved: " + newVal;
@@ -4506,6 +4556,7 @@ function renderEditRequestsPanel(panelTabs){
       const ck = btn.dataset.unlockclass;
       if(!DB.classEditRequests) DB.classEditRequests = {};
       DB.classEditRequests[ck] = { status:"unlocked", unlockedBy: currentActor().name, unlockedOn: nowStr() };
+      markDirty("classEditRequests", ck);
       saveDB();
       render();
     };
@@ -4514,6 +4565,7 @@ function renderEditRequestsPanel(panelTabs){
     btn.onclick=()=>{
       const ck = btn.dataset.relockclass;
       DB.classEditRequests[ck] = { status:"none" };
+      markDirty("classEditRequests", ck);
       saveDB();
       render();
     };
@@ -5230,6 +5282,7 @@ function renderAdminStudentPanel(panelTabs){
     btn.onclick=()=>{
       const ck = btn.dataset.unlockclass;
       DB.classEditRequests[ck] = { status:"unlocked", unlockedBy: actor.name, unlockedOn: nowStr() };
+      markDirty("classEditRequests", ck);
       saveDB();
       render();
     };
@@ -5238,6 +5291,7 @@ function renderAdminStudentPanel(panelTabs){
     btn.onclick=()=>{
       const ck = btn.dataset.relockclass;
       DB.classEditRequests[ck] = { status:"none" };
+      markDirty("classEditRequests", ck);
       saveDB();
       render();
     };
@@ -5493,6 +5547,7 @@ function renderAdminSubjectsPanel(panelTabs){
     current.push(name);
     if(!DB.subjectsByClass) DB.subjectsByClass = {};
     DB.subjectsByClass[n] = current;
+    markDirty("subjectsByClass", n);
     saveDB();
     render();
   };
@@ -5505,6 +5560,7 @@ function renderAdminSubjectsPanel(panelTabs){
       current.splice(Number(btn.dataset.delsubj), 1);
       if(!DB.subjectsByClass) DB.subjectsByClass = {};
       DB.subjectsByClass[n] = current;
+      markDirty("subjectsByClass", n);
       saveDB();
       render();
     };
@@ -5521,6 +5577,7 @@ function renderAdminSubjectsPanel(panelTabs){
     if(new Set(lower).size !== lower.length){ errEl.textContent="Two subjects can't have the same name."; return; }
     if(!DB.subjectsByClass) DB.subjectsByClass = {};
     DB.subjectsByClass[n] = names;
+    markDirty("subjectsByClass", n);
     saveDB();
     document.getElementById("subjOk").textContent = "Saved — new exam sheets for Class "+n+" will use this list.";
     setTimeout(render, 700);
