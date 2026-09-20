@@ -456,46 +456,62 @@ function saveDB(){
   dirtyPaths = [];
   saveDBChain = saveDBChain.then(async ()=>{
     try{
-      const snap = await fsdb.collection("appdata").doc("main").get();
-      if(snap.exists){
-        const server = snap.data();
-        const merged = deepMergeForSave(server, pendingDB);
-        // Override the deep-merge's handling of any field with explicit dirty-path
-        // entries: start from the SERVER's copy of every entry in that field, and
-        // only let local's version win for entries THIS save actually marked dirty.
-        // This is what stops a stale in-memory copy of some other class's sheet (or
-        // some other class's subject list, etc.) from silently reverting it when
-        // this session saves something unrelated.
-        const dirtyByTopKey = {};
-        myDirty.forEach(({topKey, subKey})=>{
-          if(!dirtyByTopKey[topKey]) dirtyByTopKey[topKey] = new Set();
-          dirtyByTopKey[topKey].add(subKey);
-        });
-        Object.keys(dirtyByTopKey).forEach(topKey=>{
-          const precise = {...(server[topKey]||{})};
-          dirtyByTopKey[topKey].forEach(subKey=>{
-            if(pendingDB[topKey] && pendingDB[topKey][subKey]!==undefined){
-              precise[subKey] = pendingDB[topKey][subKey];
-            }
+      try{
+        const snap = await fsdb.collection("appdata").doc("main").get();
+        if(snap.exists){
+          const server = snap.data();
+          const merged = deepMergeForSave(server, pendingDB);
+          // Override the deep-merge's handling of any field with explicit dirty-path
+          // entries: start from the SERVER's copy of every entry in that field, and
+          // only let local's version win for entries THIS save actually marked dirty.
+          // This is what stops a stale in-memory copy of some other class's sheet (or
+          // some other class's subject list, etc.) from silently reverting it when
+          // this session saves something unrelated.
+          const dirtyByTopKey = {};
+          myDirty.forEach(({topKey, subKey})=>{
+            if(!dirtyByTopKey[topKey]) dirtyByTopKey[topKey] = new Set();
+            dirtyByTopKey[topKey].add(subKey);
           });
-          merged[topKey] = precise;
-        });
-        // Re-apply any deletions this call made — a union-merge alone would otherwise
-        // resurrect them from the server's (older, pre-deletion) copy. Deletions can
-        // be nested two levels deep (topKey.subKey) or, for a result's own marks/
-        // subjectLocked maps, effectively arbitrary depth — walk to the right spot.
-        myDeletions.forEach(({topKey,subKey})=>{ if(merged[topKey]) delete merged[topKey][subKey]; });
-        DB = merged;
+          Object.keys(dirtyByTopKey).forEach(topKey=>{
+            const precise = {...(server[topKey]||{})};
+            dirtyByTopKey[topKey].forEach(subKey=>{
+              if(pendingDB[topKey] && pendingDB[topKey][subKey]!==undefined){
+                precise[subKey] = pendingDB[topKey][subKey];
+              }
+            });
+            merged[topKey] = precise;
+          });
+          // Re-apply any deletions this call made — a union-merge alone would otherwise
+          // resurrect them from the server's (older, pre-deletion) copy. Deletions can
+          // be nested two levels deep (topKey.subKey) or, for a result's own marks/
+          // subjectLocked maps, effectively arbitrary depth — walk to the right spot.
+          myDeletions.forEach(({topKey,subKey})=>{ if(merged[topKey]) delete merged[topKey][subKey]; });
+          DB = merged;
+        }
+      }catch(e){
+        console.error("Pre-save merge fetch failed, saving local copy as-is:", e);
       }
-    }catch(e){
-      console.error("Pre-save merge fetch failed, saving local copy as-is:", e);
-    }
-    try{
-      await fsdb.collection("appdata").doc("main").set(sanitizeForFirestore(DB));
-    }catch(err){
-      console.error("Firestore save failed:", err);
+      try{
+        await fsdb.collection("appdata").doc("main").set(sanitizeForFirestore(DB));
+      }catch(err){
+        console.error("Firestore save failed:", err);
+      }
+    }catch(fatal){
+      // Belt-and-braces: NOTHING above should ever reach here (both halves already
+      // have their own try/catch), but if some future change to the merge logic ever
+      // throws somewhere unguarded, this stops it from permanently wedging the save
+      // chain — a save chain that's stuck once from an uncaught error would silently
+      // no-op EVERY save for the rest of the session, since further calls are simply
+      // chained onto an already-rejected promise and their bodies never even run.
+      console.error("Unexpected error during save — the save chain will continue for future saves regardless:", fatal);
     }
     endSave("main");
+  }).catch(e=>{
+    // Guards the CHAIN ITSELF: if the .then() above somehow still rejects (e.g. a
+    // syntax-level throw outside any try/catch), swallow it here so saveDBChain
+    // resolves and the NEXT saveDB() call's .then() still actually executes, instead
+    // of being silently skipped forever because it's chained onto a dead promise.
+    console.error("Save chain link failed unexpectedly:", e);
   });
   return true;
 }
@@ -642,6 +658,18 @@ document.addEventListener("wheel", (e)=>{
     document.activeElement.blur();
   }
 }, { passive:true });
+
+// Warn before an accidental reload/close/back-navigation while a save is still
+// actually in flight to the server — most edits save almost instantly, but if the
+// browser is closed at the exact moment one hasn't finished yet, that one change
+// could be lost. This never blocks a NORMAL reload once everything has settled.
+window.addEventListener("beforeunload", (e)=>{
+  if(pendingSaves.main>0 || pendingSaves.students>0 || pendingSaves.teachers>0){
+    e.preventDefault();
+    e.returnValue = "Some of your changes are still being saved. Are you sure you want to leave?";
+    return e.returnValue;
+  }
+});
 
 async function bootstrapFirebase(){
   // Show something immediately using cached/bundled data instead of a blank screen
