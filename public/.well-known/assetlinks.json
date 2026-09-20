@@ -1,0 +1,8 @@
+[{
+      "relation": ["delegate_permission/common.handle_all_urls"],
+      "target": {
+        "namespace": "android_app",
+        "package_name": "in.jnvsurguja.twa",
+        "sha256_cert_fingerprints": ["D9:DB:1D:29:0A:E9:53:94:30:0C:FD:8A:89:B2:09:21:34:20:B0:54:5A:3D:A3:EC:DF:D5:FF:35:BF:08:3D:8D"]
+      }
+    }]
