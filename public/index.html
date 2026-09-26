@@ -63,6 +63,12 @@ input.mark-box{width:70px;padding:6px 8px;}
 .click-row.sel{background:#eef4fb;}
 .pill{font-size:10.5px;background:#eef1f6;color:var(--royal);padding:2px 8px;border-radius:10px;}
 .scrollbox{max-height:420px;overflow-y:auto;overflow-x:auto;border:1px solid var(--line);border-radius:8px;-webkit-overflow-scrolling:touch;}
+/* Hide the number-input spinner arrows on attendance boxes — they eat into the
+   already-tight width and were part of why a 2-digit number didn't fully show. */
+.att-box::-webkit-outer-spin-button, .att-box::-webkit-inner-spin-button,
+.wd-box::-webkit-outer-spin-button, .wd-box::-webkit-inner-spin-button{
+  -webkit-appearance:none; margin:0;
+}
 .scrollbox table{width:max-content;min-width:100%;}
 .scrollbox table{margin-top:0;}
 .topbar-row{display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;margin-bottom:6px;}
@@ -3044,8 +3050,8 @@ function renderTeacherAttendancePanel(t, panelTabs, classKey, isAssociate){
   const workingDaysRow = ATTENDANCE_MONTHS.map(m=>{
     const inactive = Number(att.workingDays[m])===0;
     return `<td>${inactive || isLocked
-      ? `<input class="wd-box" data-month="${m}" type="number" min="0" max="31" value="${att.workingDays[m]}" style="width:52px;padding:3px 4px;" ${isLocked?"disabled":""}>`
-      : `<input class="wd-box" data-month="${m}" type="number" min="0" max="31" value="${att.workingDays[m]}" style="width:52px;padding:3px 4px;">`}</td>`;
+      ? `<input class="wd-box" data-month="${m}" type="number" min="0" max="31" value="${att.workingDays[m]}" style="width:64px;padding:6px 2px;font-size:15px;text-align:center;-moz-appearance:textfield;" ${isLocked?"disabled":""}>`
+      : `<input class="wd-box" data-month="${m}" type="number" min="0" max="31" value="${att.workingDays[m]}" style="width:64px;padding:6px 2px;font-size:15px;text-align:center;-moz-appearance:textfield;">`}</td>`;
   }).join("");
 
   const rows = roster.map(s=>{
@@ -3054,7 +3060,7 @@ function renderTeacherAttendancePanel(t, panelTabs, classKey, isAssociate){
     const cells = ATTENDANCE_MONTHS.map(m=>{
       const inactive = Number(att.workingDays[m])===0;
       if(inactive) return `<td style="background:#f2f2f2;text-align:center;color:var(--muted);">—</td>`;
-      return `<td><input class="att-box" data-roll="${s.roll}" data-month="${m}" type="number" min="0" max="${att.workingDays[m]}" value="${row[m]!=null?row[m]:""}" style="width:52px;" ${isLocked?"disabled":""}></td>`;
+      return `<td><input class="att-box" data-roll="${s.roll}" data-month="${m}" type="number" min="0" max="${att.workingDays[m]}" value="${row[m]!=null?row[m]:""}" style="width:64px;padding:6px 2px;font-size:15px;text-align:center;-moz-appearance:textfield;" ${isLocked?"disabled":""}></td>`;
     }).join("");
     return `<tr><td>${s.roll}</td><td>${s.name}</td>${cells}<td><b>${totals.present}</b></td><td>${totals.working}</td><td><b>${totals.pct.toFixed(1)}%</b></td></tr>`;
   }).join("");
@@ -5159,7 +5165,23 @@ function renderAdminStudentPanel(panelTabs){
   if(cancelBtn) cancelBtn.onclick=()=>{ studentEditingRoll=null; render(); };
 
   document.getElementById("stuFilterClass").onchange=(e)=>{ studentFilterClass=e.target.value; render(); };
-  document.getElementById("stuSearch").oninput=(e)=>{ studentSearchTerm=e.target.value; render(); };
+  document.getElementById("stuSearch").oninput=(e)=>{
+    studentSearchTerm=e.target.value;
+    const cursorPos = e.target.selectionStart; // remember exactly where the cursor was
+    const scrollPos = window.scrollY; // remember exactly how far down the page was scrolled
+    render();
+    // render() rebuilds the whole page from scratch — on mobile that makes the browser
+    // treat the search box as a brand-new element (closing the keyboard) AND resets
+    // the page's scroll position back to the top, both of which make typing into it
+    // feel completely broken. Restore both right after, so it feels like a normal,
+    // continuous search box instead of jumping around on every letter.
+    const freshInput = document.getElementById("stuSearch");
+    if(freshInput){
+      freshInput.focus();
+      freshInput.setSelectionRange(cursorPos, cursorPos);
+    }
+    window.scrollTo(0, scrollPos);
+  };
 
   document.getElementById("stuSubmit").onclick=async ()=>{
     const btn = document.getElementById("stuSubmit");
