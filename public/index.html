@@ -965,7 +965,49 @@ function getResult(classKey, examKey){
     const namesMatch = officialNames.length===currentNames.length && officialNames.every(n=>currentNames.includes(n));
     if(!namesMatch){
       const byName = {}; r.subjects.forEach(s=>{ byName[s.name]=s; });
-      r.subjects = officialNames.map(name=> byName[name] ? byName[name] : {name, maxMarks:100});
+      // Known renames from the Class 11/12 Science/Arts subject-list restructuring —
+      // map an old generic subject name onto its new short name so marks already
+      // entered under the old name keep showing up under the new one instead of
+      // silently vanishing from the table (this is what actually happened to the
+      // Class 11 Science sheet: "Mathematics"/"Hindi Core"/"English Core" no longer
+      // matched the new "Maths"/"Hindi"/"English" names, so those columns looked empty
+      // even though the marks were still sitting in the data, just under the old key).
+      const RENAME_ALIASES = { "Mathematics":"Maths", "Hindi Core":"Hindi", "Hindi Elective":"Hindi", "English Core":"English" };
+      const aliasedAway = new Set(); // old names successfully folded into a new name —
+      // don't let these reappear as a confusing duplicate row further below.
+      Object.keys(RENAME_ALIASES).forEach(oldName=>{
+        const newName = RENAME_ALIASES[oldName];
+        if(byName[oldName] && !byName[newName] && officialNames.includes(newName)){
+          byName[newName] = { name:newName, maxMarks: byName[oldName].maxMarks };
+          Object.keys(r.marks||{}).forEach(roll=>{
+            const sm = r.marks[roll];
+            if(sm && sm[oldName]!=null && sm[oldName]!=="" && (sm[newName]==null || sm[newName]==="")){
+              sm[newName] = sm[oldName];
+            }
+          });
+          aliasedAway.add(oldName);
+        }
+      });
+      const newSubjects = officialNames.map(name=> byName[name] ? byName[name] : {name, maxMarks:100});
+      const newNames = new Set(newSubjects.map(s=>s.name));
+      // Safety net for every future subject-list change: NEVER silently drop a subject
+      // that still has recorded marks, even if its name isn't in the new official list
+      // — keep it as an extra row instead of making already-entered marks disappear.
+      const namesWithMarks = new Set();
+      Object.values(r.marks||{}).forEach(sm=>{
+        Object.keys(sm||{}).forEach(n=>{ if(sm[n]!=null && sm[n]!=="") namesWithMarks.add(n); });
+      });
+      r.subjects.forEach(s=>{
+        if(!newNames.has(s.name) && !aliasedAway.has(s.name) && namesWithMarks.has(s.name)){
+          newSubjects.push(s);
+          newNames.add(s.name);
+        }
+      });
+      r.subjects = newSubjects;
+      markResultDirty(k); // this repaired subjects list must actually be saved, not just
+      // fixed in memory for this one page load — otherwise the next person to open this
+      // sheet re-reconciles from the still-broken server copy every single time.
+      saveDB();
     }
   }
   if(!r.marks) r.marks = {};
