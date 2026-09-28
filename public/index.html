@@ -957,6 +957,42 @@ function getResult(classKey, examKey){
   if(!r.subjects || !r.subjects.length){
     r.subjects = subjectsForClass(classKey).map(name=>({name, maxMarks:100}));
   } else if(r.status==="draft"){
+    // Known renames from the Class 11/12 Science/Arts subject-list restructuring — map
+    // an old generic subject name onto its new short name so marks already entered
+    // under the old name keep showing up under the new one instead of silently
+    // vanishing from the table (this is what actually happened to the Class 11 Science
+    // sheet: "Mathematics"/"Hindi Core"/"English Core" no longer matched the new
+    // "Maths"/"Hindi"/"English" names, so those columns looked empty even though the
+    // marks were still sitting in the data, just under the old key).
+    //
+    // IMPORTANT: this backfill runs on EVERY draft sheet, unconditionally — not only
+    // when the subjects list still looks mismatched. A sheet that was already silently
+    // reconciled by an earlier version of this code (before this fix existed) has its
+    // subjects list already replaced with the new official names, so it would no
+    // longer LOOK mismatched at all — but the marks recorded under the old names are
+    // still sitting there unrecovered. Gating this on a mismatch check the first time
+    // is exactly why the first version of this fix didn't actually restore anything
+    // for a sheet that was already broken before the fix was deployed.
+    const officialNamesForAlias = subjectsForClass(classKey);
+    const RENAME_ALIASES = { "Mathematics":"Maths", "Hindi Core":"Hindi", "Hindi Elective":"Hindi", "English Core":"English" };
+    Object.keys(RENAME_ALIASES).forEach(oldName=>{
+      const newName = RENAME_ALIASES[oldName];
+      if(!officialNamesForAlias.includes(newName)) return;
+      Object.keys(r.marks||{}).forEach(roll=>{
+        const sm = r.marks[roll];
+        if(sm && sm[oldName]!=null && sm[oldName]!=="" && (sm[newName]==null || sm[newName]==="")){
+          sm[newName] = sm[oldName];
+        }
+      });
+      // Make sure the new name actually has a subjects-list entry to be shown under —
+      // a sheet already reconciled to the official list should already have it, but a
+      // sheet that hasn't been reconciled yet (still mismatched, handled below) might
+      // not, so add it now with the old subject's maxMarks if we can find it.
+      if(!r.subjects.some(s=>s.name===newName)){
+        const oldEntry = r.subjects.find(s=>s.name===oldName);
+        r.subjects.push({ name:newName, maxMarks: oldEntry ? oldEntry.maxMarks : 100 });
+      }
+    });
     // Reconcile a still-in-progress sheet with the current official subject list for
     // this class (e.g. if a subject was removed/renamed later) — but never touch a
     // sheet that has already been submitted or published, to keep that record accurate.
@@ -965,29 +1001,8 @@ function getResult(classKey, examKey){
     const namesMatch = officialNames.length===currentNames.length && officialNames.every(n=>currentNames.includes(n));
     if(!namesMatch){
       const byName = {}; r.subjects.forEach(s=>{ byName[s.name]=s; });
-      // Known renames from the Class 11/12 Science/Arts subject-list restructuring —
-      // map an old generic subject name onto its new short name so marks already
-      // entered under the old name keep showing up under the new one instead of
-      // silently vanishing from the table (this is what actually happened to the
-      // Class 11 Science sheet: "Mathematics"/"Hindi Core"/"English Core" no longer
-      // matched the new "Maths"/"Hindi"/"English" names, so those columns looked empty
-      // even though the marks were still sitting in the data, just under the old key).
-      const RENAME_ALIASES = { "Mathematics":"Maths", "Hindi Core":"Hindi", "Hindi Elective":"Hindi", "English Core":"English" };
-      const aliasedAway = new Set(); // old names successfully folded into a new name —
-      // don't let these reappear as a confusing duplicate row further below.
-      Object.keys(RENAME_ALIASES).forEach(oldName=>{
-        const newName = RENAME_ALIASES[oldName];
-        if(byName[oldName] && !byName[newName] && officialNames.includes(newName)){
-          byName[newName] = { name:newName, maxMarks: byName[oldName].maxMarks };
-          Object.keys(r.marks||{}).forEach(roll=>{
-            const sm = r.marks[roll];
-            if(sm && sm[oldName]!=null && sm[oldName]!=="" && (sm[newName]==null || sm[newName]==="")){
-              sm[newName] = sm[oldName];
-            }
-          });
-          aliasedAway.add(oldName);
-        }
-      });
+      const aliasedAway = new Set(Object.keys(RENAME_ALIASES).filter(oldName=>byName[oldName] && officialNames.includes(RENAME_ALIASES[oldName])));
+      // don't let these old, already-folded-in names reappear as a confusing duplicate row further below.
       const newSubjects = officialNames.map(name=> byName[name] ? byName[name] : {name, maxMarks:100});
       const newNames = new Set(newSubjects.map(s=>s.name));
       // Safety net for every future subject-list change: NEVER silently drop a subject
