@@ -416,8 +416,17 @@ let pendingDeletions = [];
 // touched, via markDirty(), and only let local's copy of THOSE win; everything else
 // always comes straight from the server, no matter what a stale in-memory copy says.
 let dirtyPaths = []; // { topKey, subKey }
-function markDirty(topKey, subKey){ dirtyPaths.push({topKey, subKey}); }
-function markResultDirty(resultKeyStr){ markDirty("results", resultKeyStr); }
+function markDirty(topKey, subKey, full){ dirtyPaths.push({topKey, subKey, full: full || false}); }
+// A result sheet changed (status, subjects, history ...). Its MARKS / subject-locks /
+// subject-editors always come from the server + this session's own typed cells (below).
+function markResultDirty(resultKeyStr){ markDirty("results", resultKeyStr, false); }
+// Whole sheet from this session, marks included — ONLY for a brand-new sheet or the
+// subject-name repair, where this session's copy really is the one that must win.
+function markResultDirtyFull(resultKeyStr){ markDirty("results", resultKeyStr, true); }
+// A sheet this session believes is brand new. It is written ONLY if the server really has
+// no such sheet — a stale tab that merely hasn't seen the sheet yet must never replace
+// the real one (with its marks) by an empty blank.
+function markResultCreate(resultKeyStr){ markDirty("results", resultKeyStr, "create"); }
 // ATTENDANCE — cell-level tracking. Attendance used to be saved by replacing the WHOLE
 // class's attendance object with this session's in-memory copy, and any save from a
 // session holding an older copy (second device, background tab, associate teacher)
@@ -483,6 +492,7 @@ function saveDB(){
   const myDirty = dirtyPaths;
   dirtyPaths = [];
   const myAttEdits = attOutstanding.slice(); // attendance cells this call is responsible for
+  const myResEdits = resOutstanding.slice(); // marks/locks this call is responsible for
 
   // Pure function (safe to run more than once): builds what should be written, from the
   // SERVER's current copy plus only what THIS session intentionally changed.
@@ -492,19 +502,39 @@ function saveDB(){
     // and only let local's version win for entries this save actually marked dirty. This
     // stops a stale in-memory copy of some other class's sheet from reverting it.
     const dirtyByTopKey = {};
-    myDirty.forEach(({topKey, subKey})=>{
+    const fullSheets = new Map();
+    myDirty.forEach(({topKey, subKey, full})=>{
       if(!dirtyByTopKey[topKey]) dirtyByTopKey[topKey] = new Set();
       dirtyByTopKey[topKey].add(subKey);
+      if(topKey==="results" && full) fullSheets.set(subKey, full);
     });
+    // Results ALWAYS start from the server (even with no dirty sheet), so a stale local
+    // copy of anyone's marks can never be written back.
+    if(!dirtyByTopKey.results) dirtyByTopKey.results = new Set();
     Object.keys(dirtyByTopKey).forEach(topKey=>{
       const precise = {...(server[topKey]||{})};
       dirtyByTopKey[topKey].forEach(subKey=>{
         if(pendingDB[topKey] && pendingDB[topKey][subKey]!==undefined){
-          precise[subKey] = pendingDB[topKey][subKey];
+          let val = pendingDB[topKey][subKey];
+          const srv = (server[topKey]||{})[subKey];
+          if(topKey==="results" && srv && fullSheets.get(subKey)==="create"){
+            return; // sheet already exists on the server — keep THAT one, never a blank
+          }
+          if(topKey==="results" && srv && !fullSheets.has(subKey)){
+            // Sheet-level change (status, subjects, history ...) from this session, but
+            // marks / subject locks / editors come from the server, not this stale copy.
+            val = JSON.parse(JSON.stringify(val));
+            val.marks = JSON.parse(JSON.stringify(srv.marks || {}));
+            val.subjectLocked = JSON.parse(JSON.stringify(srv.subjectLocked || {}));
+            val.subjectEditors = JSON.parse(JSON.stringify(srv.subjectEditors || {}));
+          }
+          precise[subKey] = val;
         }
       });
       merged[topKey] = precise;
     });
+    // Re-apply exactly the marks / locks typed in THIS session.
+    resOutstanding.forEach(e=> applyResEdit(merged.results, e, pendingDB.results));
     // Attendance: server copy + ONLY the cells edited in this session (see above).
     const attMerged = JSON.parse(JSON.stringify(server.attendance || {}));
     attOutstanding.forEach(e=> applyAttEdit(attMerged, e, pendingDB.attendance));
@@ -558,7 +588,15 @@ function saveDB(){
       // no-op EVERY later save, so never let one error wedge it.
       console.error("Unexpected error during save — the save chain will continue for future saves regardless:", fatal);
     }
+    // Anything typed while this save was in flight must still be visible locally.
+    try{
+      if(!DB.attendance) DB.attendance = {};
+      attOutstanding.forEach(e=> applyAttEdit(DB.attendance, e, null));
+      if(!DB.results) DB.results = {};
+      resOutstanding.forEach(e=> applyResEdit(DB.results, e, null));
+    }catch(replayErr){ console.error("replay of unsaved cells failed:", replayErr); }
     attOutstanding = attOutstanding.filter(e=> !myAttEdits.includes(e));
+    resOutstanding = resOutstanding.filter(e=> !myResEdits.includes(e));
     endSave("main");
   }).catch(e=>{
     // Guards the CHAIN ITSELF so the NEXT saveDB() call still runs.
@@ -992,7 +1030,7 @@ function getResult(classKey, examKey){
   if(!DB.results[k]){
     const subjects = subjectsForClass(classKey).map(name=>({name, maxMarks:100}));
     DB.results[k] = { classKey, examKey, subjects, status:"draft", marks:{}, subjectLocked:{}, enteredBy:"", editRequested:false, history:[] };
-    markResultDirty(k); // a brand-new sheet only exists locally so far — without this,
+    markResultCreate(k); // a brand-new sheet only exists locally so far — without this,
     // the save below would treat it as "untouched" and it would never actually reach
     // the server at all, since the precise results-merge starts from the server's copy.
     saveDB();
@@ -1002,6 +1040,9 @@ function getResult(classKey, examKey){
   if(!r.subjects || !r.subjects.length){
     r.subjects = subjectsForClass(classKey).map(name=>({name, maxMarks:100}));
   } else if(r.status==="draft"){
+    let repairChanged = false; // only SAVE when the repair really changed something —
+    // previously every plain read of a sheet with a leftover extra subject row re-saved
+    // the whole sheet from this tab's (possibly stale) copy, wiping other people's marks.
     // Known renames from the Class 11/12 Science/Arts subject-list restructuring — map
     // an old generic subject name onto its new short name so marks already entered
     // under the old name keep showing up under the new one instead of silently
@@ -1027,6 +1068,8 @@ function getResult(classKey, examKey){
         const sm = r.marks[roll];
         if(sm && sm[oldName]!=null && sm[oldName]!=="" && (sm[newName]==null || sm[newName]==="")){
           sm[newName] = sm[oldName];
+          resOutstanding.push({kind:"mark", rkey:k, roll, subject:newName, value:sm[oldName]});
+          repairChanged = true;
         }
       });
       // Make sure the new name actually has a subjects-list entry to be shown under —
@@ -1036,6 +1079,7 @@ function getResult(classKey, examKey){
       if(!r.subjects.some(s=>s.name===newName)){
         const oldEntry = r.subjects.find(s=>s.name===oldName);
         r.subjects.push({ name:newName, maxMarks: oldEntry ? oldEntry.maxMarks : 100 });
+        repairChanged = true;
       }
     });
     // Reconcile a still-in-progress sheet with the current official subject list for
@@ -1063,10 +1107,13 @@ function getResult(classKey, examKey){
           newNames.add(s.name);
         }
       });
+      const sig = list => JSON.stringify((list||[]).map(s=>[s.name, s.maxMarks]));
+      if(sig(r.subjects) !== sig(newSubjects)) repairChanged = true;
       r.subjects = newSubjects;
-      markResultDirty(k); // this repaired subjects list must actually be saved, not just
-      // fixed in memory for this one page load — otherwise the next person to open this
-      // sheet re-reconciles from the still-broken server copy every single time.
+    }
+    if(repairChanged){
+      markResultDirty(k); // the repaired subjects list must actually be saved (marks themselves
+      // are NOT taken from this tab — see saveDB()), so the next person doesn't redo the repair.
       saveDB();
     }
   }
@@ -1074,12 +1121,47 @@ function getResult(classKey, examKey){
   if(!r.subjectLocked) r.subjectLocked = {};
   return r;
 }
+// MARKS — cell-level tracking, same idea as attendance. Every typed mark is recorded as
+// ONE cell (sheet + roll + subject + value). saveDB() rebuilds marks from the SERVER and
+// re-applies only the cells typed in THIS session, so two teachers on the same sheet, or
+// a stale/background tab, can no longer wipe each other's numbers.
+let resOutstanding = [];
+function applyResEdit(resultsAll, e, localResultsAll){
+  let s = resultsAll[e.rkey];
+  if(!s){
+    const loc = localResultsAll && localResultsAll[e.rkey];
+    if(!loc) return;
+    s = resultsAll[e.rkey] = JSON.parse(JSON.stringify(loc)); // sheet not on server yet
+  }
+  if(e.kind==="mark"){
+    if(!s.marks) s.marks = {};
+    if(!s.marks[e.roll]) s.marks[e.roll] = {};
+    s.marks[e.roll][e.subject] = e.value;
+  } else if(e.kind==="editor"){
+    if(!s.subjectEditors) s.subjectEditors = {};
+    s.subjectEditors[e.subject] = e.value;
+  } else if(e.kind==="lock"){
+    if(!s.subjectLocked) s.subjectLocked = {};
+    s.subjectLocked[e.subject] = e.value;
+  }
+}
+function setEditorFor(r, subjectName, name){
+  if(!r.subjectEditors) r.subjectEditors = {};
+  r.subjectEditors[subjectName] = name;
+  resOutstanding.push({kind:"editor", rkey:resultKey(r.classKey, r.examKey), subject:subjectName, value:name});
+}
+function setSubjectLockFor(r, subjectName, locked){
+  if(!r.subjectLocked) r.subjectLocked = {};
+  r.subjectLocked[subjectName] = locked;
+  resOutstanding.push({kind:"lock", rkey:resultKey(r.classKey, r.examKey), subject:subjectName, value:locked});
+}
 function markFor(r, roll, subjectName){
   return (r.marks[roll] && r.marks[roll][subjectName]!=null) ? r.marks[roll][subjectName] : "";
 }
 function setMarkFor(r, roll, subjectName, value){
   if(!r.marks[roll]) r.marks[roll] = {};
   r.marks[roll][subjectName] = value;
+  resOutstanding.push({kind:"mark", rkey:resultKey(r.classKey, r.examKey), roll, subject:subjectName, value});
 }
 function standardSubjectCountForClass(classKey){
   // The number of subjects a "normal" student in this class takes: every fixed
@@ -2496,8 +2578,7 @@ function renderTeacherDash(){
     document.querySelectorAll("[data-unlocksubj]").forEach(btn=>{
       btn.onclick=()=>{
         const rNow = getResult(classKey, teacherSelectedExam);
-        if(!rNow.subjectLocked) rNow.subjectLocked = {};
-        rNow.subjectLocked[btn.dataset.unlocksubj] = false;
+        setSubjectLockFor(rNow, btn.dataset.unlocksubj, false);
         markResultDirty(resultKey(classKey, teacherSelectedExam));
         saveDB(); render();
       };
@@ -2520,9 +2601,7 @@ function renderTeacherDash(){
         e.target.style.border = "";
         e.target.title = "";
         setMarkFor(rNow, e.target.dataset.roll, e.target.dataset.subject, val);
-        if(!rNow.subjectEditors) rNow.subjectEditors = {};
-        rNow.subjectEditors[e.target.dataset.subject] = t.name;
-        markResultDirty(resultKey(classKey, teacherSelectedExam));
+        setEditorFor(rNow, e.target.dataset.subject, t.name);
         saveDB();
       };
     });
@@ -2595,7 +2674,7 @@ function renderTeacherDash(){
       setTimeout(render, 1200);
     };
     const saveBtn=document.getElementById("saveDraft");
-    if(saveBtn) saveBtn.onclick=()=>{ log(getResult(classKey, teacherSelectedExam), "Draft saved by "+t.name); alert("Draft saved."); };
+    if(saveBtn) saveBtn.onclick=()=>{ markResultDirty(resultKey(classKey, teacherSelectedExam)); log(getResult(classKey, teacherSelectedExam), "Draft saved by "+t.name); alert("Draft saved."); };
     const subBtn=document.getElementById("submitMarks");
     if(subBtn) subBtn.onclick=()=>{
       const rNow = getResult(classKey, teacherSelectedExam);
@@ -3092,9 +3171,7 @@ function renderTeacherSubjectMarksPanel(t, panelTabs){
       e.target.style.border = "";
       e.target.title = "";
       setMarkFor(rrNow, e.target.dataset.roll, subjMarksSubject, val);
-      if(!rrNow.subjectEditors) rrNow.subjectEditors = {};
-      rrNow.subjectEditors[subjMarksSubject] = t.name;
-      markResultDirty(resultKey(subjMarksClass, subjMarksExam));
+      setEditorFor(rrNow, subjMarksSubject, t.name);
       saveDB();
     };
   });
@@ -3128,10 +3205,8 @@ function renderTeacherSubjectMarksPanel(t, panelTabs){
   if(submitBtn) submitBtn.onclick=()=>{
     if(!confirm(`Submit ${subjMarksSubject} marks? You won't be able to make further changes unless the Class Teacher unlocks it.`)) return;
     const rrNow = getResult(subjMarksClass, subjMarksExam);
-    if(!rrNow.subjectLocked) rrNow.subjectLocked = {};
-    rrNow.subjectLocked[subjMarksSubject] = true;
-    if(!rrNow.subjectEditors) rrNow.subjectEditors = {};
-    rrNow.subjectEditors[subjMarksSubject] = t.name;
+    setSubjectLockFor(rrNow, subjMarksSubject, true);
+    setEditorFor(rrNow, subjMarksSubject, t.name);
     markResultDirty(resultKey(subjMarksClass, subjMarksExam));
     saveDB();
     render();
@@ -4224,9 +4299,7 @@ function renderPrincipalDash(){
       e.target.style.border = "";
       e.target.title = "";
       setMarkFor(rr, e.target.dataset.roll, e.target.dataset.subject, val);
-      if(!rr.subjectEditors) rr.subjectEditors = {};
-      rr.subjectEditors[e.target.dataset.subject] = currentActor().name;
-      markResultDirty(resultKey(principalSelectedClassKey, principalSelectedExamKey));
+      setEditorFor(rr, e.target.dataset.subject, currentActor().name);
       saveDB();
     };
   });
