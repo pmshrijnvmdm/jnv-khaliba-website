@@ -513,7 +513,7 @@ let saveSoonTimer = null;
 function saveDBSoon(){
   if(!saveSoonTimer){ beginSave("main"); } // keeps incoming snapshots from clobbering typed values
   else clearTimeout(saveSoonTimer);
-  saveSoonTimer = setTimeout(()=>{ saveSoonTimer = null; saveDB(); endSave("main"); }, 1200);
+  saveSoonTimer = setTimeout(()=>{ saveSoonTimer = null; saveDB(); endSave("main"); }, 700);
 }
 function flushSaveSoon(){
   if(saveSoonTimer){ clearTimeout(saveSoonTimer); saveSoonTimer = null; saveDB(); endSave("main"); }
@@ -6284,6 +6284,25 @@ if(SCHOOL_LOGO){
   if(logoImg){ logoImg.src = SCHOOL_LOGO; logoImg.style.display = "block"; }
 }
 bootstrapFirebase();
+// ---- BUILD LABEL + STALE-CACHE CLEAR -------------------------------------------------------
+// Teachers' phones can keep running an OLD saved copy of this page (installed-app / service
+// worker cache) even after a new file is uploaded — then none of the fixes are active. This
+// label shows which build is really running, and the first time a NEW build starts it clears
+// the old caches and reloads once, so the new code is the one in use from then on.
+const BUILD_ID = "2026-10-05-F";
+try{
+  const lbl = document.createElement("div");
+  lbl.textContent = "build " + BUILD_ID;
+  lbl.style.cssText = "position:fixed;right:6px;bottom:2px;font:10px system-ui,sans-serif;color:#999;z-index:50;pointer-events:none;";
+  document.body.appendChild(lbl);
+  if(localStorage.getItem("jnv_build") !== BUILD_ID){
+    localStorage.setItem("jnv_build", BUILD_ID);
+    const clear = (window.caches && caches.keys) ? caches.keys().then(ks=>Promise.all(ks.map(k=>caches.delete(k)))) : Promise.resolve();
+    clear.then(()=> (navigator.serviceWorker && navigator.serviceWorker.getRegistrations) ? navigator.serviceWorker.getRegistrations().then(rs=>Promise.all(rs.map(r=>r.update().catch(()=>{})))) : null)
+         .catch(()=>{})
+         .then(()=>{ if(window.__jnvDidReload!==true && !sessionStorage.getItem("jnv_reloaded_"+BUILD_ID)){ sessionStorage.setItem("jnv_reloaded_"+BUILD_ID,"1"); location.reload(); } });
+  }
+}catch(e){}
 if('serviceWorker' in navigator){
   window.addEventListener('load', ()=>{
     navigator.serviceWorker.register('service-worker.js').catch(()=>{});
