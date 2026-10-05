@@ -1193,6 +1193,10 @@ function getResult(classKey, examKey){
     }
   }
   if(!r.marks) r.marks = {};
+  if(!r.history) r.history = [];
+  if(!r.subjectLocked) r.subjectLocked = {};
+  if(!r.subjectEditors) r.subjectEditors = {};
+  if(!r.subjects) r.subjects = [];
   if(!r.subjectLocked) r.subjectLocked = {};
   return r;
 }
@@ -1228,17 +1232,26 @@ function applyResEdit(resultsAll, e, localResultsAll){
 function setMaxFor(r, subjectName, value){
   const so = (r.subjects||[]).find(x=>x.name===subjectName);
   if(so) so.maxMarks = value;
-  resOutstanding.push({kind:"max", rkey:resultKey(r.classKey, r.examKey), subject:subjectName, value});
+  resOutstanding.push({kind:"max", rkey:rkeyOf(r), subject:subjectName, value});
+}
+// Which DB.results key does this sheet live under? Older sheets saved by earlier versions may
+// not carry classKey/examKey fields, so never trust those — find the sheet by identity first.
+function rkeyOf(r){
+  try{
+    const ks = Object.keys(DB.results||{});
+    for(let i=0;i<ks.length;i++){ if(DB.results[ks[i]]===r) return ks[i]; }
+  }catch(e){}
+  return resultKey(r.classKey, r.examKey);
 }
 function setEditorFor(r, subjectName, name){
   if(!r.subjectEditors) r.subjectEditors = {};
   r.subjectEditors[subjectName] = name;
-  resOutstanding.push({kind:"editor", rkey:resultKey(r.classKey, r.examKey), subject:subjectName, value:name});
+  resOutstanding.push({kind:"editor", rkey:rkeyOf(r), subject:subjectName, value:name});
 }
 function setSubjectLockFor(r, subjectName, locked){
   if(!r.subjectLocked) r.subjectLocked = {};
   r.subjectLocked[subjectName] = locked;
-  resOutstanding.push({kind:"lock", rkey:resultKey(r.classKey, r.examKey), subject:subjectName, value:locked});
+  resOutstanding.push({kind:"lock", rkey:rkeyOf(r), subject:subjectName, value:locked});
 }
 function markFor(r, roll, subjectName){
   return (r.marks[roll] && r.marks[roll][subjectName]!=null) ? r.marks[roll][subjectName] : "";
@@ -1246,7 +1259,7 @@ function markFor(r, roll, subjectName){
 function setMarkFor(r, roll, subjectName, value){
   if(!r.marks[roll]) r.marks[roll] = {};
   r.marks[roll][subjectName] = value;
-  resOutstanding.push({kind:"mark", rkey:resultKey(r.classKey, r.examKey), roll, subject:subjectName, value});
+  resOutstanding.push({kind:"mark", rkey:rkeyOf(r), roll, subject:subjectName, value});
 }
 function standardSubjectCountForClass(classKey){
   // The number of subjects a "normal" student in this class takes: every fixed
