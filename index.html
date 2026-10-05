@@ -480,9 +480,54 @@ function deepMergeForSave(serverVal, localVal){
   });
   return merged;
 }
+// ---- SAVE-FAILURE VISIBILITY ------------------------------------------------------------
+// Until now a rejected write (Firestore daily quota used up, document too large, App Check /
+// permission problem, no internet) was only written to the browser console. The teacher saw
+// the number sitting on screen (and in this phone's cache) as if saved, but it never reached
+// the server — so a later refresh pulled the OLD server copy and the number "disappeared
+// by itself". Now the failure is shown loudly and the save is retried automatically.
+let saveRetryTimer = null;
+function showSaveBanner(detail){
+  try{
+    let b = document.getElementById("saveErrBanner");
+    if(!b){
+      b = document.createElement("div");
+      b.id = "saveErrBanner";
+      b.style.cssText = "position:fixed;top:0;left:0;right:0;z-index:99999;background:#b71c1c;color:#fff;padding:10px 14px;font:600 14px/1.35 system-ui,sans-serif;text-align:center;box-shadow:0 2px 8px rgba(0,0,0,.4);";
+      document.body.appendChild(b);
+    }
+    b.textContent = "⚠ Changes are NOT saved on the server yet" + (detail ? " ("+detail+")" : "") +
+      ". Do NOT close or refresh this page — retrying automatically. If this stays, tell the admin.";
+  }catch(e){}
+}
+function hideSaveBanner(){
+  try{ const b = document.getElementById("saveErrBanner"); if(b) b.remove(); }catch(e){}
+}
+// ---- GENTLER WRITES ----------------------------------------------------------------------
+// Every keystroke used to cause one full Firestore read+write (and one read for every other
+// logged-in device). A busy marks/attendance session could burn the free daily quota in
+// hours, after which writes fail. Typing handlers now call saveDBSoon(): it waits for a short
+// pause, then saves ONCE. Nothing is lost — every typed cell is already recorded, and the
+// pending save is flushed when the field loses focus, the tab is hidden, or the page closes.
+let saveSoonTimer = null;
+function saveDBSoon(){
+  if(!saveSoonTimer){ beginSave("main"); } // keeps incoming snapshots from clobbering typed values
+  else clearTimeout(saveSoonTimer);
+  saveSoonTimer = setTimeout(()=>{ saveSoonTimer = null; saveDB(); endSave("main"); }, 1200);
+}
+function flushSaveSoon(){
+  if(saveSoonTimer){ clearTimeout(saveSoonTimer); saveSoonTimer = null; saveDB(); endSave("main"); }
+}
+document.addEventListener("visibilitychange", ()=>{ if(document.visibilityState==="hidden") flushSaveSoon(); });
+window.addEventListener("pagehide", flushSaveSoon);
+window.addEventListener("beforeunload", flushSaveSoon);
+document.addEventListener("focusout", flushSaveSoon);
+
 function saveDB(){
   cacheLocally();
   beginSave("main");
+  if(saveSoonTimer){ clearTimeout(saveSoonTimer); saveSoonTimer = null; endSave("main"); } // this save covers it
+  if(saveRetryTimer){ clearTimeout(saveRetryTimer); saveRetryTimer = null; }
   // Calls are chained (not fired in parallel): each save must see the result of the one
   // before it, otherwise an earlier save that's slower to reach the server could finish
   // last and stomp a more recent change.
@@ -552,6 +597,7 @@ function saveDB(){
   }
 
   saveDBChain = saveDBChain.then(async ()=>{
+    let saveOK = false, lastErr = null;
     try{
       const ref = fsdb.collection("appdata").doc("main");
       let done = false;
@@ -570,28 +616,39 @@ function saveDB(){
             committed = toWrite;
           });
           if(committed) DB = committed;
-          done = true;
+          done = true; saveOK = true;
         }catch(txErr){
+          lastErr = txErr;
           console.error("Transactional save failed, falling back to plain merge-save:", txErr);
         }
       }
       // FALLBACK PATH — previous behaviour (e.g. when offline, where transactions can't run).
       if(!done){
+        let fetched = false;
         try{
           const snap = await ref.get();
           if(snap.exists){ DB = buildMerged(snap.data()); }
+          fetched = true;
         }catch(e){
-          console.error("Pre-save merge fetch failed, saving local copy as-is:", e);
+          lastErr = e;
+          console.error("Pre-save merge fetch failed — NOT writing this stale copy; will retry:", e);
         }
-        try{
-          await ref.set(sanitizeForFirestore(DB));
-        }catch(err){
-          console.error("Firestore save failed:", err);
+        // Never write this session's possibly-stale copy over the server when the merge
+        // read failed; keep the edits and retry instead.
+        if(fetched){
+          try{
+            await ref.set(sanitizeForFirestore(DB));
+            saveOK = true;
+          }catch(err){
+            lastErr = err;
+            console.error("Firestore save failed:", err);
+          }
         }
       }
     }catch(fatal){
       // Belt-and-braces: nothing above should reach here, but a stuck chain would silently
       // no-op EVERY later save, so never let one error wedge it.
+      lastErr = fatal;
       console.error("Unexpected error during save — the save chain will continue for future saves regardless:", fatal);
     }
     // Anything typed while this save was in flight must still be visible locally.
@@ -601,8 +658,18 @@ function saveDB(){
       if(!DB.results) DB.results = {};
       resOutstanding.forEach(e=> applyResEdit(DB.results, e, null));
     }catch(replayErr){ console.error("replay of unsaved cells failed:", replayErr); }
-    attOutstanding = attOutstanding.filter(e=> !myAttEdits.includes(e));
-    resOutstanding = resOutstanding.filter(e=> !myResEdits.includes(e));
+    if(saveOK){
+      attOutstanding = attOutstanding.filter(e=> !myAttEdits.includes(e));
+      resOutstanding = resOutstanding.filter(e=> !myResEdits.includes(e));
+      hideSaveBanner();
+    } else {
+      // The write did NOT reach the server: keep every edit / dirty marker / deletion so the
+      // retry sends them, tell the user, and try again shortly.
+      dirtyPaths = myDirty.concat(dirtyPaths);
+      pendingDeletions = myDeletions.concat(pendingDeletions);
+      showSaveBanner(lastErr && (lastErr.code || lastErr.message) ? String(lastErr.code || lastErr.message).slice(0,60) : "");
+      if(!saveRetryTimer){ saveRetryTimer = setTimeout(()=>{ saveRetryTimer = null; saveDB(); }, 15000); }
+    }
     endSave("main");
   }).catch(e=>{
     // Guards the CHAIN ITSELF so the NEXT saveDB() call still runs.
@@ -614,7 +681,8 @@ function persistStudents(){
   cacheLocally();
   beginSave("students");
   fsdb.collection("appdata").doc("students").set(sanitizeForFirestore({ list: STUDENTS }))
-    .catch(err=>{ console.error("Firestore save failed:", err); })
+    .then(()=>{ hideSaveBanner(); })
+    .catch(err=>{ console.error("Firestore save failed:", err); showSaveBanner(String((err&&(err.code||err.message))||"").slice(0,60)); })
     .then(()=> endSave("students"));
   return true;
 }
@@ -622,7 +690,8 @@ function persistTeachers(){
   cacheLocally();
   beginSave("teachers");
   fsdb.collection("appdata").doc("teachers").set(sanitizeForFirestore({ list: TEACHERS }))
-    .catch(err=>{ console.error("Firestore save failed:", err); })
+    .then(()=>{ hideSaveBanner(); })
+    .catch(err=>{ console.error("Firestore save failed:", err); showSaveBanner(String((err&&(err.code||err.message))||"").slice(0,60)); })
     .then(()=> endSave("teachers"));
   return true;
 }
@@ -2618,7 +2687,7 @@ function renderTeacherDash(){
         e.target.title = "";
         setMarkFor(rNow, e.target.dataset.roll, e.target.dataset.subject, val);
         setEditorFor(rNow, e.target.dataset.subject, t.name);
-        saveDB();
+        saveDBSoon();
       };
     });
     const bulkBtn = document.getElementById("bulkImportBtn");
@@ -3188,7 +3257,7 @@ function renderTeacherSubjectMarksPanel(t, panelTabs){
       e.target.title = "";
       setMarkFor(rrNow, e.target.dataset.roll, subjMarksSubject, val);
       setEditorFor(rrNow, subjMarksSubject, t.name);
-      saveDB();
+      saveDBSoon();
     };
   });
 
@@ -3341,7 +3410,7 @@ function renderTeacherAttendancePanel(t, panelTabs, classKey, isAssociate){
       if(!attNow.records[roll]) attNow.records[roll] = {};
       attNow.records[roll][month] = e.target.value;
       markAttCell(classKey, roll, month, e.target.value);
-      saveDB();
+      saveDBSoon();
     };
   });
 }
@@ -4316,7 +4385,7 @@ function renderPrincipalDash(){
       e.target.title = "";
       setMarkFor(rr, e.target.dataset.roll, e.target.dataset.subject, val);
       setEditorFor(rr, e.target.dataset.subject, currentActor().name);
-      saveDB();
+      saveDBSoon();
     };
   });
   document.querySelectorAll(".padmin-maxmarks-box").forEach(inp=>{
