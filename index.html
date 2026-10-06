@@ -393,6 +393,7 @@ function cacheLocally(){
     localStorage.setItem(STORAGE_KEY+"_students", JSON.stringify(STUDENTS));
     localStorage.setItem(STORAGE_KEY+"_teachers", JSON.stringify(TEACHERS));
   }catch(e){ /* local cache is best-effort only; Firestore is the source of truth */ }
+  if(typeof updateLastGood === "function") updateLastGood();
 }
 
 function sanitizeForFirestore(obj){
@@ -436,7 +437,7 @@ function markResultCreate(resultKeyStr){ markDirty("results", resultKeyStr, "cre
 // the SERVER's attendance and re-applies only those cells. Everything else always comes
 // from the server, so a stale copy can never overwrite anything it didn't just type.
 let attOutstanding = []; // edits made here that are not yet confirmed written to the server
-function markAttCell(classKey, roll, month, value){ attOutstanding.push({kind:"rec", classKey, roll, month, value}); }
+function markAttCell(classKey, roll, month, value){ attOutstanding.push({kind:"rec", classKey, roll, month, value}); journalPut("a|"+classKey+"|"+roll+"|"+month, value); }
 function markAttWorkingDay(classKey, month, value){ attOutstanding.push({kind:"wd", classKey, month, value}); }
 function applyAttEdit(attAll, e, localAttAll){
   let c = attAll[e.classKey];
@@ -499,6 +500,179 @@ function showSaveBanner(detail){
     b.textContent = "⚠ Changes are NOT saved on the server yet" + (detail ? " ("+detail+")" : "") +
       ". Do NOT close or refresh this page — retrying automatically. If this stays, tell the admin.";
   }catch(e){}
+}
+
+// ---- SELF-HEALING FROM THIS DEVICE'S OWN COPY ----------------------------------------------
+// Whatever goes wrong on the server, every phone keeps two small private backups of marks and
+// attendance, and quietly refills any cell the server is MISSING (it never overwrites a number
+// that is present on the server):
+//   1. a JOURNAL of every cell typed on this device in the last 7 days, and
+//   2. a "last good" copy of all marks/attendance this device has seen, which is deliberately
+//      NOT replaced when the server suddenly shows far fewer marks (that is what a wipe looks like).
+// When a teacher/principal simply opens the site, wiped marks flow back to the server by themselves.
+const LASTGOOD_KEY = STORAGE_KEY + "_lastgood";
+const JOURNAL_KEY = STORAGE_KEY + "_journal";
+let journal = {};
+try{ journal = JSON.parse(localStorage.getItem(JOURNAL_KEY) || "{}") || {}; }catch(e){ journal = {}; }
+let journalTimer = null, healing = false, lastHealAt = 0, lastGoodAt = 0;
+function cellBlank(v){ return v==="" || v==null; }
+function readLocalJSON(k){ try{ const s = localStorage.getItem(k); return s ? JSON.parse(s) : null; }catch(e){ return null; } }
+function journalPut(k, v){
+  if(healing) return;
+  journal[k] = [v, Date.now()];
+  if(!journalTimer) journalTimer = setTimeout(journalFlush, 500);
+}
+function journalFlush(){
+  journalTimer = null;
+  try{
+    const cutoff = Date.now() - 7*86400000;
+    Object.keys(journal).forEach(k=>{ if(journal[k][1] < cutoff) delete journal[k]; });
+    const keys = Object.keys(journal);
+    if(keys.length > 6000){ keys.sort((a,b)=>journal[a][1]-journal[b][1]).slice(0, keys.length-6000).forEach(k=>delete journal[k]); }
+    localStorage.setItem(JOURNAL_KEY, JSON.stringify(journal));
+  }catch(e){}
+}
+window.addEventListener("pagehide", journalFlush);
+document.addEventListener("visibilitychange", ()=>{ if(document.visibilityState==="hidden") journalFlush(); });
+
+function updateLastGood(){
+  try{
+    if(Date.now() - lastGoodAt < 120000) return;
+    lastGoodAt = Date.now();
+    const m = {}, x = {}, a = {}; let n = 0;
+    Object.keys(DB.results||{}).forEach(rk=>{
+      const r = DB.results[rk] || {}; const mm = {}; let c = 0;
+      Object.keys(r.marks||{}).forEach(roll=>{
+        const row = {};
+        Object.keys(r.marks[roll]||{}).forEach(sj=>{ const v = r.marks[roll][sj]; if(!cellBlank(v)){ row[sj] = v; c++; } });
+        if(Object.keys(row).length) mm[roll] = row;
+      });
+      if(c){ m[rk] = mm; n += c; x[rk] = {}; (r.subjects||[]).forEach(s=>{ x[rk][s.name] = s.maxMarks; }); }
+    });
+    Object.keys(DB.attendance||{}).forEach(ck=>{
+      const recs = (DB.attendance[ck]||{}).records || {}; const aa = {}; let c = 0;
+      Object.keys(recs).forEach(roll=>{
+        const row = {};
+        Object.keys(recs[roll]||{}).forEach(mo=>{ const v = recs[roll][mo]; if(!cellBlank(v)){ row[mo] = v; c++; } });
+        if(Object.keys(row).length) aa[roll] = row;
+      });
+      if(c){ a[ck] = aa; n += c; }
+    });
+    const old = readLocalJSON(LASTGOOD_KEY);
+    if(old && old.n && Date.now() - (old.t||0) < 3*86400000 && n < old.n * 0.7) return; // looks like a wipe: keep the good copy
+    localStorage.setItem(LASTGOOD_KEY, JSON.stringify({ t: Date.now(), n, m, x, a }));
+  }catch(e){}
+}
+function pendingMarkEdit(rk, roll, sj){ return resOutstanding.some(e=>e.kind==="mark" && e.rkey===rk && e.roll===roll && e.subject===sj); }
+function pendingAttEdit(ck, roll, mo){ return attOutstanding.some(e=>e.kind==="rec" && e.classKey===ck && e.roll===roll && e.month===mo); }
+function sheetForHeal(rk){
+  if(DB.results && DB.results[rk]) return DB.results[rk];
+  const i = rk.indexOf("__"); if(i < 0) return null;
+  return getResult(rk.slice(0,i), rk.slice(i+2));
+}
+function healFromLocal(){
+  if(Date.now() - lastHealAt < 45000) return 0;
+  lastHealAt = Date.now();
+  let healed = 0; healing = true;
+  try{
+    const cutoff = Date.now() - 7*86400000;
+    // 1. cells typed on THIS device that the server no longer has
+    Object.keys(journal).forEach(k=>{
+      const e = journal[k], v = e[0], t = e[1]; if(t < cutoff || cellBlank(v)) return;
+      const p = k.split("|");
+      if(p[0]==="m"){
+        const rk = p[1], roll = p[2], sj = p.slice(3).join("|");
+        const sh = DB.results && DB.results[rk];
+        const cur = sh && sh.marks && sh.marks[roll] ? sh.marks[roll][sj] : undefined;
+        if(cellBlank(cur) && !pendingMarkEdit(rk, roll, sj)){ const s = sheetForHeal(rk); if(s){ setMarkFor(s, roll, sj, v); healed++; } }
+      } else if(p[0]==="a"){
+        const ck = p[1], roll = p[2], mo = p[3];
+        const rec = DB.attendance && DB.attendance[ck] && DB.attendance[ck].records;
+        const cur = rec && rec[roll] ? rec[roll][mo] : undefined;
+        if(cellBlank(cur) && !pendingAttEdit(ck, roll, mo)){ const a = getClassAttendance(ck); if(!a.records[roll]) a.records[roll] = {}; a.records[roll][mo] = v; markAttCell(ck, roll, mo, v); healed++; }
+      }
+    });
+    // 2. the last-good copy, only where a sheet/class has clearly been wiped (5+ cells and 30%+ missing)
+    const lg = readLocalJSON(LASTGOOD_KEY);
+    if(lg && Date.now() - (lg.t||0) < 3*86400000){
+      Object.keys(lg.m||{}).forEach(rk=>{
+        const srcm = lg.m[rk], sh = DB.results && DB.results[rk]; const missing = []; let filled = 0, serverFilled = 0;
+        Object.keys(srcm).forEach(roll=>Object.keys(srcm[roll]).forEach(sj=>{
+          const v = srcm[roll][sj]; if(cellBlank(v)) return; filled++;
+          const cur = sh && sh.marks && sh.marks[roll] ? sh.marks[roll][sj] : undefined;
+          if(cellBlank(cur)){ if(!pendingMarkEdit(rk, roll, sj)) missing.push([roll, sj, v]); } else serverFilled++;
+        }));
+        if(missing.length >= 5 && missing.length >= 0.3*filled){
+          const s = sheetForHeal(rk); if(!s) return;
+          missing.forEach(m=>{ setMarkFor(s, m[0], m[1], m[2]); healed++; });
+          const mx = lg.x && lg.x[rk];
+          if(mx && serverFilled <= 5){ Object.keys(mx).forEach(sj=>{ const so = (s.subjects||[]).find(z=>z.name===sj); if(so && mx[sj]!=null && so.maxMarks!==mx[sj]) setMaxFor(s, sj, mx[sj]); }); }
+        }
+      });
+      Object.keys(lg.a||{}).forEach(ck=>{
+        const srca = lg.a[ck], rec = DB.attendance && DB.attendance[ck] && DB.attendance[ck].records; const missing = []; let filled = 0;
+        Object.keys(srca).forEach(roll=>Object.keys(srca[roll]).forEach(mo=>{
+          const v = srca[roll][mo]; if(cellBlank(v)) return; filled++;
+          const cur = rec && rec[roll] ? rec[roll][mo] : undefined;
+          if(cellBlank(cur) && !pendingAttEdit(ck, roll, mo)) missing.push([roll, mo, v]);
+        }));
+        if(missing.length >= 5 && missing.length >= 0.3*filled){
+          const a = getClassAttendance(ck);
+          missing.forEach(m=>{ if(!a.records[m[0]]) a.records[m[0]] = {}; a.records[m[0]][m[1]] = m[2]; markAttCell(ck, m[0], m[1], m[2]); healed++; });
+        }
+      });
+    }
+  }catch(e){ console.error("self-heal failed:", e); }
+  healing = false;
+  if(healed > 0){
+    saveDBSoon();
+    showToast("✅ Recovered " + healed + " missing entr" + (healed===1?"y":"ies") + " from this device's saved copy and sending to the server.");
+  }
+  return healed;
+}
+function showToast(msg){
+  try{
+    const t = document.createElement("div");
+    t.textContent = msg;
+    t.style.cssText = "position:fixed;left:8px;right:8px;bottom:26px;z-index:99997;background:#1b5e20;color:#fff;padding:10px 12px;border-radius:8px;font:600 13px/1.35 system-ui,sans-serif;text-align:center;box-shadow:0 2px 8px rgba(0,0,0,.4);";
+    document.body.appendChild(t);
+    setTimeout(()=>{ try{ t.remove(); }catch(e){} }, 12000);
+  }catch(e){}
+}
+
+function showLoadBanner(detail){
+  try{
+    let b = document.getElementById("loadErrBanner");
+    if(!b){
+      b = document.createElement("div");
+      b.id = "loadErrBanner";
+      b.style.cssText = "position:fixed;top:0;left:0;right:0;z-index:99998;background:#e65100;color:#fff;padding:10px 14px;font:600 14px/1.35 system-ui,sans-serif;text-align:center;box-shadow:0 2px 8px rgba(0,0,0,.4);";
+      document.body.appendChild(b);
+    }
+    b.textContent = "⚠ Could not load data from the server" + (detail ? " ("+detail+")" : "") +
+      " — you are seeing an OLD / empty saved copy, so marks may look missing but are NOT deleted. Do NOT enter marks or attendance now. Close and try again later.";
+  }catch(e){}
+}
+function hideLoadBanner(){
+  try{ const b = document.getElementById("loadErrBanner"); if(b) b.remove(); }catch(e){}
+}
+// Number of filled mark cells across all result sheets (used as a safety net below).
+function countMarkCells(results){
+  let n = 0;
+  Object.keys(results||{}).forEach(k=>{
+    const m = (results[k]||{}).marks || {};
+    Object.keys(m).forEach(roll=>{ Object.values(m[roll]||{}).forEach(v=>{ if(v!=="" && v!=null) n++; }); });
+  });
+  return n;
+}
+const MASS_ERASE_LIMIT = 40; // a single save that would erase more marks than this is refused
+function checkMassErase(serverData, toWrite){
+  const before = countMarkCells(serverData.results), after = countMarkCells(toWrite.results);
+  if(before - after > MASS_ERASE_LIMIT){
+    const err = new Error("this save would erase " + (before-after) + " marks — blocked");
+    err.code = "blocked-mass-erase"; err.blocked = true;
+    throw err;
+  }
 }
 function hideSaveBanner(){
   try{ const b = document.getElementById("saveErrBanner"); if(b) b.remove(); }catch(e){}
@@ -597,7 +771,7 @@ function saveDB(){
   }
 
   saveDBChain = saveDBChain.then(async ()=>{
-    let saveOK = false, lastErr = null;
+    let saveOK = false, lastErr = null, blockedSave = false;
     try{
       const ref = fsdb.collection("appdata").doc("main");
       let done = false;
@@ -612,6 +786,7 @@ function saveDB(){
           await fsdb.runTransaction(async (tx)=>{
             const snap = await tx.get(ref);
             const toWrite = snap.exists ? buildMerged(snap.data()) : pendingDB;
+            if(snap.exists) checkMassErase(snap.data(), toWrite);
             tx.set(ref, sanitizeForFirestore(toWrite));
             committed = toWrite;
           });
@@ -619,7 +794,8 @@ function saveDB(){
           done = true; saveOK = true;
         }catch(txErr){
           lastErr = txErr;
-          console.error("Transactional save failed, falling back to plain merge-save:", txErr);
+          if(txErr && txErr.blocked){ blockedSave = true; done = true; console.error("Save blocked by safety net:", txErr); }
+          else console.error("Transactional save failed, falling back to plain merge-save:", txErr);
         }
       }
       // FALLBACK PATH — previous behaviour (e.g. when offline, where transactions can't run).
@@ -627,10 +803,11 @@ function saveDB(){
         let fetched = false;
         try{
           const snap = await ref.get();
-          if(snap.exists){ DB = buildMerged(snap.data()); }
+          if(snap.exists){ const b = buildMerged(snap.data()); checkMassErase(snap.data(), b); DB = b; }
           fetched = true;
         }catch(e){
           lastErr = e;
+          if(e && e.blocked) blockedSave = true;
           console.error("Pre-save merge fetch failed — NOT writing this stale copy; will retry:", e);
         }
         // Never write this session's possibly-stale copy over the server when the merge
@@ -668,7 +845,7 @@ function saveDB(){
       dirtyPaths = myDirty.concat(dirtyPaths);
       pendingDeletions = myDeletions.concat(pendingDeletions);
       showSaveBanner(lastErr && (lastErr.code || lastErr.message) ? String(lastErr.code || lastErr.message).slice(0,60) : "");
-      if(!saveRetryTimer){ saveRetryTimer = setTimeout(()=>{ saveRetryTimer = null; saveDB(); }, 15000); }
+      if(!saveRetryTimer && !blockedSave){ saveRetryTimer = setTimeout(()=>{ saveRetryTimer = null; saveDB(); }, 15000); }
     }
     endSave("main");
   }).catch(e=>{
@@ -850,6 +1027,7 @@ async function bootstrapFirebase(){
     ]);
 
     if(mainSnap.exists){ DB = Object.assign(defaultDB(), mainSnap.data()); }
+    else if(mainSnap.metadata && mainSnap.metadata.fromCache){ throw new Error("server copy unavailable (offline cache only)"); }
     else { await mainRef.set(DB); }
 
     if(studentsSnap.exists){ STUDENTS = studentsSnap.data().list || STUDENTS; }
@@ -859,8 +1037,11 @@ async function bootstrapFirebase(){
     else { await teachersRef.set({ list: TEACHERS }); }
 
     cacheLocally();
+    hideLoadBanner();
+    setTimeout(healFromLocal, 800);
   }catch(e){
     console.error("Could not reach Firestore, using local/offline copy:", e);
+    showLoadBanner(String((e && (e.code || e.message)) || "").slice(0,60));
   }
 
   // Live sync: if another device changes data, pull it in — but don't yank the screen
@@ -872,8 +1053,8 @@ async function bootstrapFirebase(){
   function safeRerender(){ if(SAFE_TO_AUTO_RERENDER.includes(route)) render(); }
   mainRef.onSnapshot(snap=>{
     if(isSnapshotSuppressed("main")) return;
-    if(snap.exists){ DB = Object.assign(defaultDB(), snap.data()); cacheLocally(); safeRerender(); }
-  }, err=>console.error("main sync error:", err));
+    if(snap.exists){ DB = Object.assign(defaultDB(), snap.data()); cacheLocally(); hideLoadBanner(); safeRerender(); setTimeout(healFromLocal, 1500); }
+  }, err=>{ console.error("main sync error:", err); showLoadBanner(String((err && (err.code || err.message)) || "").slice(0,60)); });
   studentsRef.onSnapshot(snap=>{
     if(isSnapshotSuppressed("students")) return;
     if(snap.exists && snap.data().list){ STUDENTS = snap.data().list; cacheLocally(); safeRerender(); }
@@ -1259,7 +1440,9 @@ function markFor(r, roll, subjectName){
 function setMarkFor(r, roll, subjectName, value){
   if(!r.marks[roll]) r.marks[roll] = {};
   r.marks[roll][subjectName] = value;
-  resOutstanding.push({kind:"mark", rkey:rkeyOf(r), roll, subject:subjectName, value});
+  const rk = rkeyOf(r);
+  resOutstanding.push({kind:"mark", rkey:rk, roll, subject:subjectName, value});
+  journalPut("m|"+rk+"|"+roll+"|"+subjectName, value);
 }
 function standardSubjectCountForClass(classKey){
   // The number of subjects a "normal" student in this class takes: every fixed
@@ -6302,7 +6485,7 @@ bootstrapFirebase();
 // worker cache) even after a new file is uploaded — then none of the fixes are active. This
 // label shows which build is really running, and the first time a NEW build starts it clears
 // the old caches and reloads once, so the new code is the one in use from then on.
-const BUILD_ID = "2026-10-05-F";
+const BUILD_ID = "2026-10-06-H";
 try{
   const lbl = document.createElement("div");
   lbl.textContent = "build " + BUILD_ID;
