@@ -185,6 +185,7 @@ input.mark-box{width:70px;padding:6px 8px;}
       <button data-r="academics">Academics</button>
       <button data-r="faculty">Faculty</button>
       <button data-r="pyq">PYQs</button>
+      <button data-r="homework">Homework</button>
       <button data-r="elibrary">E-Library</button>
       <button data-r="blog">Blog</button>
       <button data-r="careerguidance">Career Guidance</button>
@@ -640,6 +641,61 @@ function showToast(msg){
   }catch(e){}
 }
 
+
+// ---- STATUS PANEL / EVIDENCE LOG ------------------------------------------------------------
+// Tap the small "build …" label (bottom-right) to see what THIS phone knows: last save result,
+// last server update, unsaved edits, data size, approximate reads/writes today, and a log of
+// recent events — including "server marks dropped from N to M", which pinpoints WHEN data was
+// wiped. Screenshot it and send it to the developer.
+const DIAG_KEY = STORAGE_KEY + "_diag", USAGE_KEY = STORAGE_KEY + "_usage";
+let diagLog = []; try{ diagLog = JSON.parse(localStorage.getItem(DIAG_KEY) || "[]") || []; }catch(e){ diagLog = []; }
+let serverDataLoaded = false, lastSaveInfo = "none yet", lastSnapInfo = "none yet", lastSaveFailed = false;
+function nowStr(){ try{ return new Date().toLocaleString("en-IN",{hour12:false}); }catch(e){ return String(Date.now()); } }
+function diag(msg){
+  diagLog.push(nowStr() + "  " + msg);
+  if(diagLog.length > 60) diagLog = diagLog.slice(-60);
+  try{ localStorage.setItem(DIAG_KEY, JSON.stringify(diagLog)); }catch(e){}
+}
+function bumpUsage(kind, n){
+  try{
+    const day = new Date().toISOString().slice(0,10);
+    let u = JSON.parse(localStorage.getItem(USAGE_KEY) || "null");
+    if(!u || u.d !== day) u = { d: day, w: 0, r: 0 };
+    u[kind] += n;
+    localStorage.setItem(USAGE_KEY, JSON.stringify(u));
+  }catch(e){}
+}
+function diagText(){
+  let bytes = -1; try{ bytes = JSON.stringify(DB).length; }catch(e){}
+  let u = { w:0, r:0 }; try{ const x = JSON.parse(localStorage.getItem(USAGE_KEY) || "null"); if(x && x.d === new Date().toISOString().slice(0,10)) u = x; }catch(e){}
+  return [
+    "build " + (typeof BUILD_ID !== "undefined" ? BUILD_ID : "?"),
+    "now: " + nowStr(),
+    "server data loaded: " + (serverDataLoaded ? "yes" : "NO"),
+    "last save: " + lastSaveInfo,
+    "last server update: " + lastSnapInfo,
+    "unsaved edits: marks " + resOutstanding.length + ", attendance " + attOutstanding.length,
+    "data size on this phone: " + Math.round(bytes/1024) + " KB (Firestore limit is 1024 KB for the main document)",
+    "marks in this phone's server copy: " + countMarkCells(DB.results),
+    "this phone today: ~" + u.w + " writes, ~" + u.r + " reads (free limit per DAY for the whole school: 20000 writes / 50000 reads)",
+    "", "recent events (newest first):"
+  ].concat(diagLog.slice(-30).reverse()).join("\n");
+}
+function openDiagPanel(){
+  try{
+    let o = document.getElementById("diagPanel"); if(o){ o.remove(); return; }
+    o = document.createElement("div"); o.id = "diagPanel";
+    o.style.cssText = "position:fixed;inset:0;z-index:100000;background:#fff;color:#111;padding:12px;overflow:auto;font:12px/1.4 ui-monospace,Menlo,monospace;";
+    const pre = document.createElement("pre"); pre.style.cssText = "white-space:pre-wrap;word-break:break-word;margin:0 0 10px;"; pre.textContent = diagText();
+    const bar = document.createElement("div"); bar.style.cssText = "position:sticky;top:0;background:#fff;padding-bottom:8px;";
+    const close = document.createElement("button"); close.textContent = "Close"; close.style.cssText = "font-size:15px;padding:8px 14px;margin-right:8px;";
+    close.onclick = ()=>o.remove();
+    const copy = document.createElement("button"); copy.textContent = "Copy"; copy.style.cssText = "font-size:15px;padding:8px 14px;";
+    copy.onclick = ()=>{ try{ navigator.clipboard.writeText(pre.textContent); copy.textContent = "Copied"; }catch(e){} };
+    bar.appendChild(close); bar.appendChild(copy); o.appendChild(bar); o.appendChild(pre); document.body.appendChild(o);
+  }catch(e){}
+}
+
 function showLoadBanner(detail){
   try{
     let b = document.getElementById("loadErrBanner");
@@ -839,7 +895,13 @@ function saveDB(){
       attOutstanding = attOutstanding.filter(e=> !myAttEdits.includes(e));
       resOutstanding = resOutstanding.filter(e=> !myResEdits.includes(e));
       hideSaveBanner();
+      bumpUsage("w", 1); bumpUsage("r", 1);
+      lastSaveInfo = "OK " + nowStr();
+      if(lastSaveFailed){ diag("save OK again (recovered)"); lastSaveFailed = false; }
     } else {
+      lastSaveInfo = "FAILED " + nowStr() + " " + String((lastErr && (lastErr.code || lastErr.message)) || "").slice(0,80);
+      if(!lastSaveFailed || blockedSave){ diag("save FAILED: " + String((lastErr && (lastErr.code || lastErr.message)) || "unknown").slice(0,120)); }
+      lastSaveFailed = true;
       // The write did NOT reach the server: keep every edit / dirty marker / deletion so the
       // retry sends them, tell the user, and try again shortly.
       dirtyPaths = myDirty.concat(dirtyPaths);
@@ -1038,10 +1100,13 @@ async function bootstrapFirebase(){
 
     cacheLocally();
     hideLoadBanner();
+    serverDataLoaded = true; bumpUsage("r", 3);
+    diag("boot: server data loaded, marks=" + countMarkCells(DB.results));
     setTimeout(healFromLocal, 800);
   }catch(e){
     console.error("Could not reach Firestore, using local/offline copy:", e);
     showLoadBanner(String((e && (e.code || e.message)) || "").slice(0,60));
+    diag("boot: could NOT load server data: " + String((e && (e.code || e.message)) || "").slice(0,100));
   }
 
   // Live sync: if another device changes data, pull it in — but don't yank the screen
@@ -1053,7 +1118,18 @@ async function bootstrapFirebase(){
   function safeRerender(){ if(SAFE_TO_AUTO_RERENDER.includes(route)) render(); }
   mainRef.onSnapshot(snap=>{
     if(isSnapshotSuppressed("main")) return;
-    if(snap.exists){ DB = Object.assign(defaultDB(), snap.data()); cacheLocally(); hideLoadBanner(); safeRerender(); setTimeout(healFromLocal, 1500); }
+    if(snap.exists){
+      const before = countMarkCells(DB.results), incoming = snap.data();
+      const after = countMarkCells(incoming.results);
+      DB = Object.assign(defaultDB(), incoming);
+      serverDataLoaded = true; bumpUsage("r", 1); lastSnapInfo = nowStr() + " (marks " + after + ")";
+      if(before - after >= 10){
+        diag("⚠ SERVER marks dropped " + before + " → " + after + " (changed by another device/session, not by this phone)");
+        lastHealAt = 0;
+        showToast("⚠ Server marks suddenly dropped (" + before + " → " + after + "). Trying to restore from saved copies…");
+      }
+      cacheLocally(); hideLoadBanner(); safeRerender(); setTimeout(healFromLocal, 1500);
+    }
   }, err=>{ console.error("main sync error:", err); showLoadBanner(String((err && (err.code || err.message)) || "").slice(0,60)); });
   studentsRef.onSnapshot(snap=>{
     if(isSnapshotSuppressed("students")) return;
@@ -1286,10 +1362,14 @@ function getResult(classKey, examKey){
   if(!DB.results[k]){
     const subjects = subjectsForClass(classKey).map(name=>({name, maxMarks:100}));
     DB.results[k] = { classKey, examKey, subjects, status:"draft", marks:{}, subjectLocked:{}, enteredBy:"", editRequested:false, history:[] };
-    markResultCreate(k); // a brand-new sheet only exists locally so far — without this,
-    // the save below would treat it as "untouched" and it would never actually reach
-    // the server at all, since the precise results-merge starts from the server's copy.
-    saveDB();
+    // Only record/save a "new sheet" once real server data has been loaded — otherwise a phone
+    // that could not read the server would invent sheets from its empty/old local copy.
+    // (Typed marks still reach the server later: they carry their own sheet copy.)
+    if(serverDataLoaded){
+      markResultCreate(k); // a brand-new sheet only exists locally so far — without this,
+      // the save below would treat it as "untouched" and it would never reach the server.
+      saveDB();
+    }
   }
   // heal older/partial records
   const r = DB.results[k];
@@ -1367,7 +1447,7 @@ function getResult(classKey, examKey){
       if(sig(r.subjects) !== sig(newSubjects)) repairChanged = true;
       r.subjects = newSubjects;
     }
-    if(repairChanged){
+    if(repairChanged && serverDataLoaded){
       markResultDirty(k); // the repaired subjects list must actually be saved (marks themselves
       // are NOT taken from this tab — see saveDB()), so the next person doesn't redo the repair.
       saveDB();
@@ -1659,6 +1739,7 @@ function render(){
   if(route==="facilities") return renderFacilitiesPage();
   if(route==="faculty") return renderFacultyPage();
   if(route==="pyq") return renderPublicPyqPage();
+  if(route==="homework") return renderPublicHomeworkPage();
   if(route==="elibrary") return renderPublicLibraryPage();
   if(route==="blog") return renderPublicBlogPage();
   if(route==="careerguidance") return renderPublicCareerGuidancePage();
@@ -2074,6 +2155,204 @@ function renderPublicPyqPage(){
     ${footerHtml()}
   `;
   wireFooter();
+}
+
+
+/* ---------------- HOMEWORK & ASSIGNMENTS ----------------
+   Stored in its OWN Firestore document  appdata/homework  =  { items: { <id>: {...} } }  — never
+   inside the big "main" document, so it cannot affect marks/attendance or grow that document.
+   Every post/delete is a single-key write (set-merge / update + FieldValue.delete), so two teachers
+   posting at the same moment can never overwrite each other. The document is only read when someone
+   opens the Homework page or a teacher's Homework tab (no extra reads for ordinary visitors).
+   PDFs go to Cloudinary exactly like the PYQ / E-Library uploads. */
+let HOMEWORK = {}, hwSynced = false, hwUnsub = null, hwError = "";
+const HW_SHOW_DAYS = 60, HW_DELETE_AFTER_DAYS = 90;
+function hwRef(){ return fsdb.collection("appdata").doc("homework"); }
+function escHw(s){ return String(s==null ? "" : s).replace(/[&<>"']/g, c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c])); }
+function ensureHomeworkSync(){
+  if(hwUnsub) return;
+  try{
+    hwUnsub = hwRef().onSnapshot(snap=>{
+      hwError = "";
+      const d = snap.exists ? snap.data() : null;
+      HOMEWORK = (d && d.items) || {};
+      hwSynced = true;
+      repaintHomework();
+    }, err=>{
+      console.error("homework sync error:", err);
+      hwError = String((err && (err.code || err.message)) || "error").slice(0,60);
+      hwSynced = true; repaintHomework();
+    });
+  }catch(e){ hwError = String((e && e.message) || e).slice(0,60); hwSynced = true; }
+}
+function hwItems(){
+  const cutoff = Date.now() - HW_SHOW_DAYS*86400000;
+  return Object.values(HOMEWORK || {}).filter(x=>x && typeof x.created === "number" && x.created >= cutoff).sort((a,b)=>b.created - a.created);
+}
+function hwClassNumbers(){ return [...new Set(CLASS_LIST.map(c=>c.key.split("-")[0]))].sort((a,b)=>Number(a)-Number(b)); }
+function hwSections(){ return [...new Set(CLASS_LIST.map(c=>c.key.split("-").slice(1).join("-")))].filter(Boolean).sort(); }
+function hwSubjectsFor(cls){
+  const set = new Set();
+  CLASS_LIST.filter(c=>c.key.split("-")[0]===cls).forEach(c=>{ (subjectsForClass(c.key)||[]).forEach(s=>set.add(s)); });
+  return [...set];
+}
+function hwFmtDate(ms){ try{ return new Date(ms).toLocaleDateString("en-IN",{day:"numeric",month:"short",year:"numeric"}); }catch(e){ return ""; } }
+function hwCardHtml(p, canDelete){
+  const url = /^https:\/\//.test(p.fileUrl || "") ? p.fileUrl : "";
+  const due = p.due ? (()=>{ try{ return new Date(p.due + "T00:00:00").toLocaleDateString("en-IN",{day:"numeric",month:"short",year:"numeric"}); }catch(e){ return escHw(p.due); } })() : "";
+  const badge = p.type === "Assignment" ? "background:#e8f0fe;color:#1a4fa3;" : "background:#e6f4ea;color:#17692e;";
+  return `
+    <div class="fac-card fac-plain" style="margin-bottom:10px;">
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:4px;">
+        <span style="${badge}font-size:11px;font-weight:700;padding:2px 8px;border-radius:10px;">${escHw(p.type || "Homework")}</span>
+        <span style="font-size:11.5px;color:var(--muted);">Class ${escHw(p.cls)}${p.section && p.section !== "All" ? "-" + escHw(p.section) : " (all sections)"}${p.subject ? " · " + escHw(p.subject) : ""}</span>
+      </div>
+      <h4 style="color:var(--navy);font-size:14px;">${escHw(p.title)}</h4>
+      <p style="font-size:11.5px;color:var(--muted);margin:4px 0 8px;">Posted by ${escHw(p.teacherName)} · ${hwFmtDate(p.created)}${due ? " · Last date: <b>" + escHw(due) + "</b>" : ""}</p>
+      ${p.desc ? `<div style="white-space:pre-wrap;font-size:12.5px;background:#faf8f2;border:1px solid var(--line);border-radius:8px;padding:10px;margin-bottom:10px;">${escHw(p.desc)}</div>` : ""}
+      ${url ? `<a href="${escHw(url)}" target="_blank" rel="noopener"><button class="btn btn-outline btn-sm">📄 View / Download PDF</button></a>` : ""}
+      ${canDelete ? `<button class="btn btn-red btn-sm" data-hwdel="${escHw(p.id)}" style="margin-left:8px;">Delete</button>` : ""}
+    </div>`;
+}
+function renderPublicHomeworkPage(){
+  ensureHomeworkSync();
+  const opts = (arr, all)=> `<option value="">${all}</option>` + arr.map(x=>`<option value="${escHw(x)}">${escHw(x)}</option>`).join("");
+  app.innerHTML = `
+    <div class="card">
+      <h2 style="color:var(--navy)">Homework &amp; Assignments</h2>
+      <p style="font-size:13px;color:var(--muted);margin-top:6px;">Posted by our teachers. Showing the last ${HW_SHOW_DAYS} days.</p>
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:10px;">
+        <div><label>Class</label><select id="hwFClass">${opts(hwClassNumbers(), "All classes")}</select></div>
+        <div><label>Section</label><select id="hwFSec">${opts(hwSections(), "All sections")}</select></div>
+        <div><label>Type</label><select id="hwFType">${opts(["Homework","Assignment"], "Homework + Assignments")}</select></div>
+      </div>
+    </div>
+    <div class="card" id="hwPublicList"></div>
+    ${footerHtml()}
+  `;
+  wireFooter();
+  ["hwFClass","hwFSec","hwFType"].forEach(id=>{ document.getElementById(id).onchange = paintPublicHomework; });
+  paintPublicHomework();
+}
+function paintPublicHomework(){
+  const box = document.getElementById("hwPublicList"); if(!box) return;
+  if(!hwSynced){ box.innerHTML = `<p style="color:var(--muted);font-size:13.5px;">Loading…</p>`; return; }
+  if(hwError){ box.innerHTML = `<p style="color:var(--muted);font-size:13.5px;">Could not load homework right now (${escHw(hwError)}). Please try again later.</p>`; return; }
+  const v = id => { const e = document.getElementById(id); return e ? e.value : ""; };
+  const fc = v("hwFClass"), fs = v("hwFSec"), ft = v("hwFType");
+  const list = hwItems().filter(p=> (!fc || p.cls === fc) && (!fs || p.section === "All" || p.section === fs) && (!ft || p.type === ft));
+  box.innerHTML = list.length ? list.map(p=>hwCardHtml(p, false)).join("") : `<p style="color:var(--muted);font-size:13.5px;">No homework or assignments posted for this selection yet.</p>`;
+}
+function paintTeacherHomework(){
+  const box = document.getElementById("hwMyList"); if(!box || !session || session.role !== "teacher") return;
+  if(!hwSynced){ box.innerHTML = `<p style="color:var(--muted);font-size:13px;">Loading…</p>`; return; }
+  if(hwError){ box.innerHTML = `<p class="error">Could not load your posts (${escHw(hwError)}).</p>`; return; }
+  const mine = hwItems().filter(p=>p.teacherId === session.teacher.id);
+  box.innerHTML = mine.length ? mine.map(p=>hwCardHtml(p, true)).join("") : `<p style="color:var(--muted);font-size:13px;">You have not posted anything in the last ${HW_SHOW_DAYS} days.</p>`;
+}
+function repaintHomework(){ try{ paintPublicHomework(); paintTeacherHomework(); }catch(e){ console.error(e); } }
+
+// Makes the "📚 Homework" tab work from ANY teacher panel without editing each panel's own wiring.
+document.addEventListener("click", e=>{
+  const b = e.target && e.target.closest ? e.target.closest("#tabHomework") : null;
+  if(b && session && session.role === "teacher" && teacherPanel !== "homework"){ teacherPanel = "homework"; render(); }
+});
+
+function renderTeacherHomeworkPanel(t, panelTabs, classKey){
+  ensureHomeworkSync();
+  const defCls = classKey && classKey !== "NONE" ? classKey.split("-")[0] : "";
+  const defSec = classKey && classKey !== "NONE" ? classKey.split("-").slice(1).join("-") : "All";
+  const clsOpts = hwClassNumbers().map(c=>`<option value="${escHw(c)}" ${c===defCls?"selected":""}>Class ${escHw(c)}</option>`).join("");
+  const secOpts = `<option value="All">All sections</option>` + hwSections().map(s=>`<option value="${escHw(s)}" ${s===defSec?"selected":""}>Section ${escHw(s)}</option>`).join("");
+  app.innerHTML = `
+    <button class="back-link" id="back">&larr; Logout</button>
+    <div class="card">
+      ${teacherHeaderHtml(t, t.designation)}
+      ${panelTabs}
+      <h4 style="color:var(--navy);margin-bottom:6px;">Post Homework / Assignment</h4>
+      <p style="font-size:12px;color:var(--muted);margin-bottom:10px;">Visible to everyone on the public <b>Homework</b> page, with your name. Upload a PDF and/or write the details.</p>
+      <label>Type</label>
+      <select id="hwType"><option>Homework</option><option>Assignment</option></select>
+      <label>Class</label>
+      <select id="hwClass"><option value="">Select class</option>${clsOpts}</select>
+      <label>Section</label>
+      <select id="hwSec">${secOpts}</select>
+      <label>Subject</label>
+      <select id="hwSubj"></select>
+      <label>Title</label>
+      <input id="hwTitle" placeholder="e.g. Chapter 5 – Exercise 5.2">
+      <label>Details (optional)</label>
+      <textarea id="hwDesc" rows="4" placeholder="Instructions for students…"></textarea>
+      <label>Last date to submit (optional)</label>
+      <input id="hwDue" type="date">
+      <label>PDF file (optional, up to 10 MB)</label>
+      <input id="hwFile" type="file" accept="application/pdf">
+      <div class="error" id="hwErr"></div>
+      <div class="success" id="hwOk"></div>
+      <button class="btn btn-primary" id="hwPost">Post</button>
+
+      <h4 style="color:var(--navy);margin-top:24px;margin-bottom:10px;">My recent posts</h4>
+      <div id="hwMyList"></div>
+    </div>
+  `;
+  document.getElementById("back").onclick = ()=>{ session = null; go("home"); };
+  const ids = { tabMarks:"marks", tabSubjectMarks:"subjectmarks", tabStudents:"students", tabAttendance:"attendance", tabLeave:"leave", tabBlog:"blog", tabGuidance:"guidance", tabAccount:"account" };
+  Object.keys(ids).forEach(id=>{ const b = document.getElementById(id); if(b) b.onclick = ()=>{ teacherPanel = ids[id]; render(); }; });
+
+  const fillSubjects = ()=>{
+    const cls = document.getElementById("hwClass").value;
+    const subs = cls ? hwSubjectsFor(cls) : [];
+    document.getElementById("hwSubj").innerHTML = subs.map(s=>`<option value="${escHw(s)}">${escHw(s)}</option>`).join("") + `<option value="Other">Other / General</option>`;
+  };
+  document.getElementById("hwClass").onchange = fillSubjects; fillSubjects();
+  paintTeacherHomework();
+
+  document.getElementById("hwMyList").onclick = async ev=>{
+    const btn = ev.target.closest ? ev.target.closest("[data-hwdel]") : null; if(!btn) return;
+    const id = btn.dataset.hwdel; const item = HOMEWORK[id];
+    if(!item || item.teacherId !== t.id) return;
+    if(!confirm("Delete this post?")) return;
+    try{ await hwRef().update({ ["items." + id]: firebase.firestore.FieldValue.delete() }); }
+    catch(e){ alert("Could not delete: " + String((e && (e.code || e.message)) || e)); }
+  };
+
+  document.getElementById("hwPost").onclick = async ()=>{
+    const errEl = document.getElementById("hwErr"), okEl = document.getElementById("hwOk"), btn = document.getElementById("hwPost");
+    errEl.textContent = ""; okEl.textContent = "";
+    const type = document.getElementById("hwType").value, cls = document.getElementById("hwClass").value,
+          section = document.getElementById("hwSec").value, subject = document.getElementById("hwSubj").value,
+          title = document.getElementById("hwTitle").value.trim(), desc = document.getElementById("hwDesc").value.trim(),
+          due = document.getElementById("hwDue").value, fileInput = document.getElementById("hwFile"),
+          file = fileInput.files && fileInput.files[0];
+    if(!cls){ errEl.textContent = "Please select the class."; return; }
+    if(!title){ errEl.textContent = "Please enter a title."; return; }
+    if(!file && !desc){ errEl.textContent = "Please write the details or attach a PDF."; return; }
+    if(file){
+      if(file.type !== "application/pdf" && !/\.pdf$/i.test(file.name || "")){ errEl.textContent = "Only PDF files can be uploaded."; return; }
+      if(file.size > 10*1024*1024){ errEl.textContent = "This PDF is larger than 10 MB. Please upload a smaller file."; return; }
+    }
+    btn.disabled = true; btn.textContent = file ? "Uploading PDF…" : "Posting…";
+    try{
+      let fileUrl = "";
+      if(file){ fileUrl = await uploadToCloudinary(file, "auto"); }
+      const id = "hw_" + Date.now() + "_" + Math.random().toString(36).slice(2,7);
+      const item = { id, type, cls, section, subject, title, desc, due, fileUrl, teacherName: t.name, teacherId: t.id, created: Date.now() };
+      await hwRef().set({ items: { [id]: item } }, { merge: true });
+      // Housekeeping: drop posts older than HW_DELETE_AFTER_DAYS so this document stays small.
+      try{
+        const cutoff = Date.now() - HW_DELETE_AFTER_DAYS*86400000, upd = {};
+        Object.values(HOMEWORK || {}).filter(x=>x && typeof x.created === "number" && x.created < cutoff).slice(0,25)
+          .forEach(x=>{ upd["items." + x.id] = firebase.firestore.FieldValue.delete(); });
+        if(Object.keys(upd).length) await hwRef().update(upd);
+      }catch(e){}
+      okEl.textContent = "Posted! It is now visible on the Homework page.";
+      document.getElementById("hwTitle").value = ""; document.getElementById("hwDesc").value = "";
+      document.getElementById("hwDue").value = ""; fileInput.value = "";
+    }catch(e){
+      errEl.textContent = "Could not post: " + String((e && (e.code || e.message)) || e);
+    }
+    btn.disabled = false; btn.textContent = "Post";
+  };
 }
 
 /* ---------------- PUBLIC: E-LIBRARY ---------------- */
@@ -2598,6 +2877,7 @@ function renderTeacherDash(){
       <button class="btn ${teacherPanel==='attendance'?'btn-primary':'btn-outline'} btn-sm" id="tabAttendance" style="margin-right:8px;">📋 Attendance</button>
       <button class="btn ${teacherPanel==='leave'?'btn-primary':'btn-outline'} btn-sm" id="tabLeave" style="margin-right:8px;">🗓 Leave Application</button>
       <button class="btn ${teacherPanel==='blog'?'btn-primary':'btn-outline'} btn-sm" id="tabBlog" style="margin-right:8px;">📝 Blog</button>
+      <button class="btn ${teacherPanel==='homework'?'btn-primary':'btn-outline'} btn-sm" id="tabHomework" style="margin-right:8px;">📚 Homework</button>
       <button class="btn ${teacherPanel==='guidance'?'btn-primary':'btn-outline'} btn-sm" id="tabGuidance" style="margin-right:8px;">🎯 Career Guidance</button>
       <button class="btn ${teacherPanel==='account'?'btn-primary':'btn-outline'} btn-sm" id="tabAccount">🔑 Change / Forgot Password</button>
     </div>`;
@@ -2612,6 +2892,10 @@ function renderTeacherDash(){
   }
   if(teacherPanel === "blog"){
     renderTeacherBlogPanel(t, panelTabs);
+    return;
+  }
+  if(teacherPanel === "homework"){
+    renderTeacherHomeworkPanel(t, panelTabs, classKey);
     return;
   }
   if(teacherPanel === "guidance"){
@@ -6485,11 +6769,12 @@ bootstrapFirebase();
 // worker cache) even after a new file is uploaded — then none of the fixes are active. This
 // label shows which build is really running, and the first time a NEW build starts it clears
 // the old caches and reloads once, so the new code is the one in use from then on.
-const BUILD_ID = "2026-10-06-H";
+const BUILD_ID = "2026-10-07-J";
 try{
   const lbl = document.createElement("div");
-  lbl.textContent = "build " + BUILD_ID;
-  lbl.style.cssText = "position:fixed;right:6px;bottom:2px;font:10px system-ui,sans-serif;color:#999;z-index:50;pointer-events:none;";
+  lbl.textContent = "build " + BUILD_ID + " ⓘ";
+  lbl.style.cssText = "position:fixed;right:4px;bottom:0;font:11px system-ui,sans-serif;color:#888;z-index:50;padding:8px 8px 6px;cursor:pointer;";
+  lbl.onclick = openDiagPanel;
   document.body.appendChild(lbl);
   if(localStorage.getItem("jnv_build") !== BUILD_ID){
     localStorage.setItem("jnv_build", BUILD_ID);
